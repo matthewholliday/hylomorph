@@ -87,6 +87,141 @@ Full output is captured to `.harness/logs/hooks/`; a head+tail excerpt lands in
 the iteration record. By convention all hooks block except `run_e2e_tests`
 (non-blocking by default); override per hook in `guardrails.toml`.
 
+## Example: a TypeScript project driven by Claude Code
+
+This walks through wiring `harness` into a typical TypeScript project that uses
+`tsc`, ESLint, and Vitest, with [Claude Code](https://claude.com/claude-code)
+as the agent.
+
+### 1. Point the agent adapter at Claude Code
+
+In `.harness/harness.toml`, set `[agent].command`. `harness` writes the composed
+prompt to a temp file each iteration and substitutes its path for
+`{prompt_file}`; Claude Code reads it on stdin in non-interactive (`-p`) mode:
+
+```toml
+[agent]
+# Fresh `claude` process per iteration, reading the prompt from stdin.
+command = "claude -p --dangerously-skip-permissions < {prompt_file}"
+working_dir = "."
+
+[loop]
+max_iterations = 50
+commit_each_success = true
+reset_on_failure = true        # restore the tree to last commit after a failed iteration
+
+[hooks]
+default = ["run_build", "run_lint", "run_unit_tests"]
+default_timeout_secs = 600
+```
+
+> `--dangerously-skip-permissions` lets the agent edit files unattended. Pair it
+> with the `[writes]` allowlist in `guardrails.toml` and the per-iteration git
+> commit so every green state is recoverable.
+
+### 2. Write the hook scripts
+
+Each hook is just an executable in `.harness/scripts/hooks/` that exits `0` on
+pass. `harness init` creates stubs; replace their bodies with the real commands.
+
+`.harness/scripts/hooks/run_build` — type-check with `tsc`:
+
+```sh
+#!/usr/bin/env sh
+# Build = the TypeScript compiles with no errors.
+npx tsc --noEmit
+```
+
+`.harness/scripts/hooks/run_lint` — ESLint over the source:
+
+```sh
+#!/usr/bin/env sh
+# Lint = ESLint passes (and Prettier, if you use it).
+npx eslint . --max-warnings=0
+```
+
+`.harness/scripts/hooks/run_unit_tests` — Vitest in run-once mode:
+
+```sh
+#!/usr/bin/env sh
+# Unit tests = the Vitest suite is green. CI=true keeps it non-interactive.
+CI=true npx vitest run
+```
+
+`.harness/scripts/hooks/run_e2e_tests` — Playwright (non-blocking by default):
+
+```sh
+#!/usr/bin/env sh
+# End-to-end = Playwright. Kept non-blocking locally (see guardrails below).
+CI=true npx playwright test
+```
+
+Make them executable (the stubs `init` writes already are; new ones need it):
+
+```sh
+chmod +x .harness/scripts/hooks/*
+```
+
+A hook can read the task as JSON on stdin if it wants to scope its work — for
+example, only running tests for the files a task touched. With Node available
+you can parse it inline:
+
+```sh
+#!/usr/bin/env sh
+# Scope Vitest to the task's files_hint, if any were provided.
+PATTERNS=$(node -e 'const t=JSON.parse(require("fs").readFileSync(0,"utf8")); process.stdout.write((t.files_hint||[]).join(" "))')
+if [ -n "$PATTERNS" ]; then
+  CI=true npx vitest run $PATTERNS
+else
+  CI=true npx vitest run
+fi
+```
+
+### 3. Keep e2e advisory, scope writes
+
+In `.harness/guardrails/guardrails.toml`:
+
+```toml
+[writes]
+allow = ["src/**", "tests/**", "docs/**", ".specs/**"]
+deny  = [".harness/guardrails/**", ".git/**", "**/.env*"]
+
+[operations]
+deny_destructive = true
+
+# Playwright is slow and flaky without a server — record it but don't block on it.
+[hooks.run_e2e_tests]
+blocking = false
+timeout_secs = 1800
+```
+
+### 4. Reference hooks per task
+
+A task in `.specs/<name>/3-tasks.jsonl` can override the default hook set via its
+`hooks` field — e.g. a pure type-model change that needs the compiler and linter
+but no tests yet:
+
+```json
+{"id":"T-001","spec":"api","title":"Add User type and zod schema","requirements":["REQ-001"],"status":"todo","priority":1,"depends_on":[],"hooks":["run_build","run_lint"],"acceptance":["User schema parses a valid payload","tsc passes"],"files_hint":["src/models/user.ts"],"attempts":0,"max_attempts":3,"notes":"","created_at":"2026-06-20T00:00:00Z","updated_at":"2026-06-20T00:00:00Z"}
+```
+
+Tasks that omit `hooks` fall back to `[hooks].default` from `harness.toml`.
+
+### 5. Verify and run
+
+```sh
+harness doctor                   # confirms claude is callable, hooks exist, git is present
+harness hooks run run_build      # smoke-test a single hook by hand
+harness spec validate api
+harness run                      # drive the loop; each task is built/linted/tested before it counts as done
+```
+
+If `tsc` or Vitest fails, the iteration fails: `harness` increments the task's
+`attempts`, restores the working tree to the last clean commit (because
+`reset_on_failure = true`), and either retries or parks the task as `blocked`
+once `max_attempts` is hit — so a broken type or red test never gets recorded as
+done on the agent's say-so.
+
 ## Status
 
 v0.1. Implemented: the full loop, hooks, spec validation/sync (read-only),
