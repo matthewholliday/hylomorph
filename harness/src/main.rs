@@ -6,15 +6,16 @@ mod spec;
 mod state;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 
 use crate::config::{find_project_root, load_harness_config};
 use crate::hooks::{run_hook, HookInvocation};
 use crate::loop_runner::{run, RunOptions};
-use crate::spec::{list_specs, load_requirements, load_tasks, spec_dir, TaskStatus};
+use crate::spec::{list_specs, load_requirements, load_tasks, save_tasks, spec_dir, Task, TaskStatus};
 use crate::state::load_state;
 
 #[derive(Parser)]
@@ -329,8 +330,8 @@ fn cmd_spec(root: &Path, cmd: SpecCmd) -> Result<i32> {
                 Ok(1)
             }
         }
-        SpecCmd::Sync { name, .. } => {
-            cmd_sync(root, &name)?;
+        SpecCmd::Sync { name, write, regen_tasks, .. } => {
+            cmd_sync(root, &name, write, regen_tasks)?;
             Ok(0)
         }
     }
@@ -544,21 +545,30 @@ fn detect_cycle(tasks: &[spec::Task]) -> Result<()> {
         node: &'a str,
         graph: &HashMap<&'a str, &'a Vec<String>>,
         color: &mut HashMap<&'a str, u8>,
+        path: &mut Vec<&'a str>,
     ) -> Result<()> {
         color.insert(node, 1);
+        path.push(node);
         if let Some(deps) = graph.get(node) {
             for d in deps.iter() {
                 match color.get(d.as_str()).copied().unwrap_or(0) {
-                    1 => anyhow::bail!("dependency cycle detected at task {d}"),
+                    1 => {
+                        // Show the full cycle chain for easy debugging.
+                        let cycle_start = path.iter().position(|&n| n == d.as_str()).unwrap_or(0);
+                        let mut chain: Vec<&str> = path[cycle_start..].to_vec();
+                        chain.push(d.as_str());
+                        anyhow::bail!("dependency cycle: {}", chain.join(" → "));
+                    }
                     0 => {
                         if let Some((k, _)) = graph.get_key_value(d.as_str()) {
-                            visit(k, graph, color)?;
+                            visit(k, graph, color, path)?;
                         }
                     }
                     _ => {}
                 }
             }
         }
+        path.pop();
         color.insert(node, 2);
         Ok(())
     }
@@ -566,42 +576,104 @@ fn detect_cycle(tasks: &[spec::Task]) -> Result<()> {
     let keys: Vec<&str> = graph.keys().copied().collect();
     for k in keys {
         if color.get(k).copied().unwrap_or(0) == 0 {
-            visit(k, &graph, &mut color)?;
+            visit(k, &graph, &mut color, &mut Vec::new())?;
         }
     }
     Ok(())
 }
 
-fn cmd_sync(root: &Path, name: &str) -> Result<()> {
+fn cmd_sync(root: &Path, name: &str, write: bool, regen_tasks: bool) -> Result<()> {
     let dir = spec_dir(root, name);
     let reqs = load_requirements(&dir)?;
-    let tasks = load_tasks(&dir)?;
+    let mut tasks = load_tasks(&dir)?;
 
     let req_ids: std::collections::HashSet<String> =
         reqs.requirements.iter().map(|r| r.id.clone()).collect();
     let covered: std::collections::HashSet<String> =
         tasks.iter().flat_map(|t| t.requirements.clone()).collect();
 
+    let uncovered: Vec<_> = reqs.requirements.iter().filter(|r| !covered.contains(&r.id)).collect();
+    let orphaned: Vec<(String, String)> = tasks
+        .iter()
+        .flat_map(|t| {
+            t.requirements
+                .iter()
+                .filter(|r| !req_ids.contains(*r))
+                .map(|r| (t.id.clone(), r.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     println!("Drift report for '{name}':");
     let mut clean = true;
-    for id in &req_ids {
-        if !covered.contains(id) {
-            println!("  ! requirement {id} has no task");
-            clean = false;
-        }
+    for r in &uncovered {
+        let text = r.text.as_deref().unwrap_or("(no text)");
+        println!("  ! {} has no task — {}", r.id, text);
+        clean = false;
     }
-    for t in &tasks {
-        for r in &t.requirements {
-            if !req_ids.contains(r) {
-                println!("  ! task {} references unknown requirement {r}", t.id);
-                clean = false;
-            }
-        }
+    for (tid, rid) in &orphaned {
+        println!("  ! task {tid} references unknown requirement {rid}");
+        clean = false;
     }
     if clean {
         println!("  (no drift detected)");
+        return Ok(());
     }
-    println!("\nNote: sync is read-only in this build; --write/--regen-tasks not yet implemented.");
+
+    if !write && !regen_tasks {
+        println!("\nRe-run with --write to generate task stubs for uncovered requirements.");
+        return Ok(());
+    }
+
+    if write && !uncovered.is_empty() {
+        let max_num: u32 = tasks
+            .iter()
+            .filter_map(|t| t.id.strip_prefix("T-").and_then(|n| n.parse::<u32>().ok()))
+            .max()
+            .unwrap_or(0);
+
+        let now = Utc::now();
+        let mut next_num = max_num + 1;
+
+        for req in &uncovered {
+            let title = req
+                .text
+                .as_deref()
+                .unwrap_or(&format!("Implement {}", req.id))
+                .chars()
+                .take(80)
+                .collect::<String>();
+            let task = Task {
+                id: format!("T-{:03}", next_num),
+                spec: name.to_string(),
+                title,
+                requirements: vec![req.id.clone()],
+                status: TaskStatus::Todo,
+                priority: 100,
+                depends_on: vec![],
+                hooks: vec![],
+                acceptance: req.acceptance_criteria.clone(),
+                files_hint: vec![],
+                attempts: 0,
+                max_attempts: 3,
+                notes: None,
+                phases: vec![],
+                completed_phases: vec![],
+                created_at: now,
+                updated_at: now,
+            };
+            println!("  + T-{:03} for {}", next_num, req.id);
+            tasks.push(task);
+            next_num += 1;
+        }
+        save_tasks(&dir, &tasks)?;
+        println!("  wrote {} new task stub(s) to .specs/{name}/3-tasks.jsonl", uncovered.len());
+    }
+
+    if regen_tasks {
+        eprintln!("note: --regen-tasks (full task regeneration from requirements) is not yet implemented.");
+    }
+
     Ok(())
 }
 
@@ -665,6 +737,7 @@ fn find_task_json(root: &Path, task_id: &str) -> Result<Option<(String, String)>
 
 fn cmd_status(root: &Path) -> Result<i32> {
     let state = load_state(root)?;
+    let config = load_harness_config(root).unwrap_or_default();
     println!("active spec:     {:?}", state.active_spec);
     println!("iteration count: {}", state.iteration_count);
     println!(
@@ -672,6 +745,7 @@ fn cmd_status(root: &Path) -> Result<i32> {
         state.last_task_id, state.last_task_status
     );
 
+    let has_phases = !config.loop_config.phase_sequence.is_empty();
     let (mut todo, mut prog, mut blocked, mut done) = (0, 0, 0, 0);
     for s in list_specs(root)? {
         for t in load_tasks(&spec_dir(root, &s))? {
@@ -680,6 +754,25 @@ fn cmd_status(root: &Path) -> Result<i32> {
                 TaskStatus::InProgress => prog += 1,
                 TaskStatus::Blocked => blocked += 1,
                 TaskStatus::Done => done += 1,
+            }
+            // Show phase detail for tasks with partial phase completion.
+            if has_phases && !t.completed_phases.is_empty() && t.status != TaskStatus::Done {
+                let phase_seq: &Vec<String> = if t.phases.is_empty() {
+                    &config.loop_config.phase_sequence
+                } else {
+                    &t.phases
+                };
+                let phases_display: Vec<String> = phase_seq
+                    .iter()
+                    .map(|p| {
+                        if t.completed_phases.contains(p) {
+                            format!("{p} ✓")
+                        } else {
+                            p.clone()
+                        }
+                    })
+                    .collect();
+                println!("  {} [{:?}] phases: {}", t.id, t.status, phases_display.join(", "));
             }
         }
     }
@@ -746,6 +839,31 @@ fn cmd_doctor(root: &Path) -> Result<i32> {
             !c.agent.command.trim().is_empty(),
             "set [agent].command"
         );
+
+        // Verify the agent binary is reachable on PATH by extracting the base
+        // command (first whitespace-delimited token, ignoring redirect syntax).
+        let base_cmd = c
+            .agent
+            .command
+            .split(|ch: char| ch.is_whitespace() || ch == '<')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !base_cmd.is_empty() && !base_cmd.contains('{') {
+            let on_path = Command::new(&base_cmd)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok();
+            check!(
+                format!("agent '{base_cmd}' reachable on PATH"),
+                on_path,
+                format!("'{base_cmd}' not found — verify [agent].command in harness.toml")
+            );
+        }
+
         let hooks_dir = root.join(".harness").join("scripts").join("hooks");
         for h in &c.hooks.default {
             let exists = [h.clone(), format!("{h}.ps1"), format!("{h}.cmd"), format!("{h}.bat")]

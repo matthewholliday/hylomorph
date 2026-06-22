@@ -111,6 +111,10 @@ pub fn run_hook(
         });
     }
 
+    // Save the PID before moving the child into the wait thread so we can
+    // kill the process if the timeout fires.
+    let pid = child.id();
+
     // Watchdog: kill the child if it exceeds the timeout.
     let (tx, rx) = mpsc::channel::<()>();
     let killer = child;
@@ -120,16 +124,12 @@ pub fn run_hook(
         let handle = thread::spawn(move || {
             let out = killer.wait_with_output();
             let _ = otx.send(out);
-            // signal completion (ignore error if receiver already dropped)
             let _ = tx.send(());
         });
         // Wait for either completion or timeout.
         let timed_out = rx.recv_timeout(Duration::from_secs(timeout_secs)).is_err();
         if timed_out {
-            // Best-effort kill of the process tree by pid is not available here
-            // since the child was moved; the wait thread will return once the
-            // process is reaped. We mark timed_out and still collect output.
-            // To actually terminate, we rely on the OS-level kill below.
+            kill_by_pid(pid);
         }
         let _ = handle.join();
         (orx.recv(), timed_out)
@@ -195,6 +195,20 @@ pub fn truncate_output(s: &str, head: usize, tail: usize) -> String {
     ));
     out.extend(lines[lines.len() - tail..].iter().map(|l| l.to_string()));
     out.join("\n")
+}
+
+/// Kill a process by PID. On Unix we send SIGKILL; on Windows we use taskkill.
+/// Best-effort — errors are silently ignored since this is a cleanup path.
+#[cfg(unix)]
+fn kill_by_pid(pid: u32) {
+    let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+}
+
+#[cfg(not(unix))]
+fn kill_by_pid(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .status();
 }
 
 /// Is a hook blocking? Per-hook guardrail config wins; otherwise everything

@@ -61,6 +61,10 @@ pub struct LoopConfig {
     /// restores the original single-agent-per-task behaviour.
     #[serde(default)]
     pub phase_sequence: Vec<String>,
+    /// Keep at most this many iteration log JSON files. Oldest are pruned at
+    /// run start. `None` (the default) means unlimited.
+    #[serde(default)]
+    pub max_log_files: Option<usize>,
 }
 
 fn default_reset_on_failure() -> bool {
@@ -88,6 +92,7 @@ impl Default for LoopConfig {
             stop_when_no_tasks: default_stop_when_no_tasks(),
             reset_on_failure: default_reset_on_failure(),
             phase_sequence: Vec::new(),
+            max_log_files: None,
         }
     }
 }
@@ -98,6 +103,11 @@ pub struct PromptsConfig {
     pub loop_prompt: String,
     #[serde(default = "default_init_prompt")]
     pub init: String,
+    /// Hard cap on the assembled prompt size in characters. When the composed
+    /// prompt exceeds this limit the middle is trimmed and a truncation marker
+    /// is inserted. `None` (the default) means unlimited.
+    #[serde(default)]
+    pub max_prompt_chars: Option<usize>,
 }
 
 fn default_loop_prompt() -> String {
@@ -113,6 +123,7 @@ impl Default for PromptsConfig {
         Self {
             loop_prompt: default_loop_prompt(),
             init: default_init_prompt(),
+            max_prompt_chars: None,
         }
     }
 }

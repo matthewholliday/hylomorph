@@ -1,9 +1,11 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::config::{load_guardrails, load_harness_config, PhaseConfig};
 use crate::hooks::{
@@ -12,7 +14,8 @@ use crate::hooks::{
 use crate::prompt::{compose_prompt, write_prompt_file};
 use crate::spec::{list_specs, load_tasks, save_tasks, spec_dir, Task, TaskStatus};
 use crate::state::{
-    append_progress, load_state, save_iteration_record, save_state, HookResult, IterationRecord,
+    append_progress, load_state, prune_iteration_logs, save_iteration_record, save_state,
+    HookResult, IterationRecord,
 };
 
 pub struct RunOptions {
@@ -29,15 +32,40 @@ struct PoolEntry {
     idx: usize,
 }
 
+/// Build a GlobSet from a list of deny patterns for write-protection checks.
+fn build_deny_set(patterns: &[String]) -> Option<GlobSet> {
+    if patterns.is_empty() {
+        return None;
+    }
+    let mut builder = GlobSetBuilder::new();
+    for pat in patterns {
+        match GlobBuilder::new(pat).build() {
+            Ok(g) => { builder.add(g); }
+            Err(_) => {} // skip malformed patterns silently
+        }
+    }
+    builder.build().ok()
+}
+
 /// Run the Ralph loop. Returns a process exit code (0 success, 2 blocked, 3 agent failure).
 pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
     let config = load_harness_config(root)?;
     let guardrails = load_guardrails(root)?;
     let mut state = load_state(root)?;
 
-    // Determine scope.
+    // Prune old iteration logs if a retention limit is configured.
+    if let Some(max_files) = config.loop_config.max_log_files {
+        prune_iteration_logs(root, max_files)
+            .unwrap_or_else(|e| eprintln!("warning: log pruning failed: {e:#}"));
+    }
+
+    // Determine scope. --spec accepts a comma-separated list of spec names.
     let scope: Vec<String> = match &opts.spec_filter {
-        Some(name) => vec![name.clone()],
+        Some(filter) => filter
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
         None => list_specs(root)?,
     };
     if scope.is_empty() {
@@ -54,6 +82,42 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
         tasks_by_spec.push((name.clone(), tasks));
     }
 
+    // Reset any tasks stuck InProgress from a prior crash. Without this, a
+    // harness that dies between the agent run and hook validation leaves the
+    // task permanently skipped on the next run.
+    for (spec_name, tasks) in &mut tasks_by_spec {
+        let mut dirty = false;
+        for task in tasks.iter_mut() {
+            if task.status == TaskStatus::InProgress {
+                let note = "[startup] found InProgress after crash".to_string();
+                task.notes = Some(match &task.notes {
+                    Some(e) if !e.is_empty() => format!("{e}\n{note}"),
+                    _ => note,
+                });
+                if task.attempts >= task.max_attempts {
+                    task.status = TaskStatus::Blocked;
+                } else {
+                    task.status = TaskStatus::Todo;
+                }
+                task.updated_at = Utc::now();
+                dirty = true;
+            }
+        }
+        if dirty {
+            persist_spec(root, spec_name, tasks)?;
+            append_progress(
+                root,
+                &format!(
+                    "- [{}] startup: reset stuck InProgress task(s) in spec '{spec_name}'",
+                    now()
+                ),
+            )?;
+        }
+    }
+
+    // Build the deny GlobSet from guardrails once; reused each iteration.
+    let deny_set = build_deny_set(&guardrails.writes.deny);
+
     // Effective iteration budget: min of config, guardrails, and CLI override.
     let mut budget = config.loop_config.max_iterations as u64;
     budget = budget.min(guardrails.budgets.max_iterations as u64);
@@ -65,6 +129,7 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
         state.run_start = Some(Utc::now());
     }
 
+    let wall_start = Instant::now();
     let mut iter: u64 = 0;
     let mut agent_failure = false;
 
@@ -108,7 +173,7 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
                 .filter(|t| t.status == TaskStatus::Blocked)
                 .count();
             let (done, total) = count_done_total(&tasks_by_spec);
-            print_summary(done, blocked, total - done - blocked);
+            print_summary(done, blocked, total - done - blocked, wall_start.elapsed().as_secs());
             persist_all(root, &tasks_by_spec, &mut state)?;
             return Ok(if blocked > 0 { 2 } else { 0 });
         };
@@ -191,8 +256,9 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
             all_blocking_passed = false;
             agent_failure = true;
         } else {
-            // Guard: reject any writes to spec or harness config/prompt/script files.
-            let violations = check_protected_writes(root);
+            // Guard: reject any writes to spec or harness config/prompt/script files,
+            // and any writes matching the guardrails [writes].deny patterns.
+            let violations = check_protected_writes(root, deny_set.as_ref());
             if !violations.is_empty() {
                 eprintln!(
                     "error: agent wrote to protected path(s) — failing iteration:\n{}",
@@ -423,7 +489,7 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
         .flat_map(|(_, ts)| ts.iter())
         .filter(|t| t.status == TaskStatus::Blocked)
         .count();
-    print_summary(done, blocked, total - done - blocked);
+    print_summary(done, blocked, total - done - blocked, wall_start.elapsed().as_secs());
 
     if agent_failure && opts.once {
         return Ok(3);
@@ -554,49 +620,74 @@ fn git_reset_workdir(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn print_summary(done: usize, blocked: usize, remaining: usize) {
+fn print_summary(done: usize, blocked: usize, remaining: usize, elapsed_secs: u64) {
     println!("\n=== harness summary ===");
     println!("  done:      {done}");
     println!("  blocked:   {blocked}");
     println!("  remaining: {remaining}");
+    let mins = elapsed_secs / 60;
+    let secs = elapsed_secs % 60;
+    if mins > 0 {
+        println!("  elapsed:   {mins}m {secs}s");
+    } else {
+        println!("  elapsed:   {secs}s");
+    }
 }
 
 /// Return a list of paths the agent modified that fall under protected areas:
 ///   - `.specs/`  (spec source of truth — never agent-writable)
 ///   - `.harness/` except `.harness/logs/` (config, guardrails, prompts, scripts)
+///   - any path matching the `[writes].deny` patterns from guardrails.toml
 ///
 /// Checks both tracked-file diffs (via `git diff --name-only HEAD`) and new
 /// untracked files (via `git ls-files --others --exclude-standard`).
-fn check_protected_writes(root: &Path) -> Vec<String> {
-    fn is_protected(path: &str) -> bool {
+/// On a fresh repo with no HEAD, the diff step is skipped gracefully.
+fn check_protected_writes(root: &Path, deny_set: Option<&GlobSet>) -> Vec<String> {
+    fn is_protected(path: &str, deny_set: Option<&GlobSet>) -> bool {
         // Block anything under .specs/
         if path.starts_with(".specs/") || path == ".specs" {
             return true;
         }
         // Block .harness/ except .harness/logs/
-        if path.starts_with(".harness/") {
-            return !path.starts_with(".harness/logs/");
+        if path.starts_with(".harness/") && !path.starts_with(".harness/logs/") {
+            return true;
+        }
+        // Apply guardrails [writes].deny glob patterns.
+        if let Some(set) = deny_set {
+            if set.is_match(path) {
+                return true;
+            }
         }
         false
     }
 
     let mut violations = Vec::new();
 
-    // Modified tracked files.
-    if let Ok(out) = Command::new("git")
-        .args(["diff", "--name-only", "HEAD"])
+    // Check whether HEAD exists; on fresh repos git diff HEAD errors out.
+    let has_head = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
         .current_dir(root)
         .output()
-    {
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let p = line.trim();
-            if !p.is_empty() && is_protected(p) {
-                violations.push(p.to_string());
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if has_head {
+        // Modified tracked files vs HEAD.
+        if let Ok(out) = Command::new("git")
+            .args(["diff", "--name-only", "HEAD"])
+            .current_dir(root)
+            .output()
+        {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let p = line.trim();
+                if !p.is_empty() && is_protected(p, deny_set) {
+                    violations.push(p.to_string());
+                }
             }
         }
     }
 
-    // New untracked files.
+    // New untracked files (works on fresh repos too).
     if let Ok(out) = Command::new("git")
         .args(["ls-files", "--others", "--exclude-standard"])
         .current_dir(root)
@@ -604,7 +695,7 @@ fn check_protected_writes(root: &Path) -> Vec<String> {
     {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
             let p = line.trim();
-            if !p.is_empty() && is_protected(p) {
+            if !p.is_empty() && is_protected(p, deny_set) {
                 violations.push(p.to_string());
             }
         }

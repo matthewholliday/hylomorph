@@ -7,6 +7,26 @@ use crate::config::HarnessConfig;
 use crate::spec::{spec_dir, Task, load_requirements};
 use crate::state::read_progress;
 
+/// Truncate text to `max_chars` total, keeping `head_chars` from the start
+/// and `tail_chars` from the end with a `[...]` marker in the middle.
+/// Cut points snap to the nearest newline boundary so no line is split.
+fn truncate_at_newlines(text: &str, max_chars: usize, head_chars: usize, tail_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    // Head: snap backward to the last newline at or before head_chars.
+    let head_raw: String = chars[..head_chars.min(chars.len())].iter().collect();
+    let head_end = head_raw.rfind('\n').map(|i| i + 1).unwrap_or(head_chars.min(chars.len()));
+    // Tail: snap forward to the next newline at or after the tail start.
+    let tail_start_abs = chars.len().saturating_sub(tail_chars);
+    let tail_raw: String = chars[tail_start_abs..].iter().collect();
+    let tail_start = tail_start_abs + tail_raw.find('\n').unwrap_or(0);
+    let head: String = chars[..head_end].iter().collect();
+    let tail: String = chars[tail_start..].iter().collect();
+    format!("{}\n\n[...]\n\n{}", head, tail)
+}
+
 pub fn substitute(template: &str, vars: &[(&str, &str)]) -> String {
     let mut result = template.to_string();
     for (key, value) in vars {
@@ -89,14 +109,7 @@ pub fn compose_prompt(
     let design_excerpt = if design_path.exists() {
         let design = fs::read_to_string(&design_path)
             .with_context(|| format!("Failed to read design.md at {:?}", design_path))?;
-        if design.chars().count() < 4000 {
-            design
-        } else {
-            let chars: Vec<char> = design.chars().collect();
-            let first: String = chars[..2000].iter().collect();
-            let last: String = chars[chars.len().saturating_sub(500)..].iter().collect();
-            format!("{}\n\n[...]\n\n{}", first, last)
-        }
+        truncate_at_newlines(&design, 4000, 2000, 500)
     } else {
         String::new()
     };
@@ -133,6 +146,30 @@ pub fn compose_prompt(
         task_acceptance,
     );
     body.push_str(&footer);
+
+    // Apply the global prompt size cap, trimming from the middle to preserve
+    // the task directive at the end.
+    if let Some(max_chars) = _config.prompts.max_prompt_chars {
+        let total = body.chars().count();
+        if total > max_chars {
+            let head_chars = max_chars * 7 / 10;
+            let tail_chars = max_chars / 10;
+            let chars: Vec<char> = body.chars().collect();
+            // Snap head to the nearest preceding newline.
+            let head_str: String = chars[..head_chars].iter().collect();
+            let head_end = head_str.rfind('\n').map(|i| i + 1).unwrap_or(head_chars);
+            // Snap tail to the nearest following newline.
+            let tail_start_abs = chars.len().saturating_sub(tail_chars);
+            let tail_str: String = chars[tail_start_abs..].iter().collect();
+            let tail_start = tail_start_abs + tail_str.find('\n').unwrap_or(0);
+            let head: String = chars[..head_end].iter().collect();
+            let tail: String = chars[tail_start..].iter().collect();
+            body = format!(
+                "{}\n\n[... prompt truncated: {total} chars exceeded max_prompt_chars={max_chars} ...]\n\n{}",
+                head, tail
+            );
+        }
+    }
 
     Ok(body)
 }
