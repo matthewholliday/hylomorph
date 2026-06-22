@@ -455,6 +455,7 @@ fn cmd_spec_draft(
 
 fn validate_spec(root: &Path, name: &str) -> Result<()> {
     let dir = spec_dir(root, name);
+    let config = load_harness_config(root).unwrap_or_default();
 
     let reqs = load_requirements(&dir).with_context(|| "1-requirements.json failed to parse")?;
     let req_ids: std::collections::HashSet<String> =
@@ -487,6 +488,16 @@ fn validate_spec(root: &Path, name: &str) -> Result<()> {
     let tasks = load_tasks(&dir).with_context(|| "3-tasks.jsonl failed to parse")?;
     let task_ids: std::collections::HashSet<String> = tasks.iter().map(|t| t.id.clone()).collect();
     let hooks_dir = root.join(".harness").join("scripts").join("hooks");
+
+    // All known phase names: global sequence + any explicitly configured phases.
+    let known_phases: std::collections::HashSet<&str> = config
+        .loop_config
+        .phase_sequence
+        .iter()
+        .map(|s| s.as_str())
+        .chain(config.phases.keys().map(|s| s.as_str()))
+        .collect();
+
     for t in &tasks {
         for r in &t.requirements {
             if !req_ids.contains(r) {
@@ -504,6 +515,18 @@ fn validate_spec(root: &Path, name: &str) -> Result<()> {
                 .any(|c| hooks_dir.join(c).exists());
             if !exists {
                 anyhow::bail!("task {} references missing hook script '{}'", t.id, h);
+            }
+        }
+        // Validate task-level phase overrides against the known phase set.
+        if !t.phases.is_empty() && !known_phases.is_empty() {
+            for p in &t.phases {
+                if !known_phases.contains(p.as_str()) {
+                    anyhow::bail!(
+                        "task {} references phase '{}' which is not defined in \
+                         [loop].phase_sequence or [phases.*] in harness.toml",
+                        t.id, p
+                    );
+                }
             }
         }
     }
@@ -730,6 +753,34 @@ fn cmd_doctor(root: &Path) -> Result<i32> {
                 .any(|cand| hooks_dir.join(cand).exists());
             check!(format!("hook '{h}' present"), exists, "create the hook stub");
         }
+
+        if !c.loop_config.phase_sequence.is_empty() {
+            println!("phases: {}", c.loop_config.phase_sequence.join(" → "));
+            for phase_name in &c.loop_config.phase_sequence {
+                if let Some(phase_cfg) = c.phases.get(phase_name) {
+                    if let Some(hooks) = &phase_cfg.hooks {
+                        for h in hooks {
+                            let exists =
+                                [h.clone(), format!("{h}.ps1"), format!("{h}.cmd"), format!("{h}.bat")]
+                                    .iter()
+                                    .any(|cand| hooks_dir.join(cand).exists());
+                            check!(
+                                format!("phase '{phase_name}' hook '{h}' present"),
+                                exists,
+                                "create the hook stub"
+                            );
+                        }
+                    }
+                    if let Some(tmpl) = &phase_cfg.prompt_template {
+                        check!(
+                            format!("phase '{phase_name}' prompt template present"),
+                            root.join(tmpl).exists(),
+                            format!("create {tmpl}")
+                        );
+                    }
+                }
+            }
+        }
     }
 
     let specs = list_specs(root).unwrap_or_default();
@@ -760,6 +811,12 @@ commit_message_template = "harness: {task_id} {task_title}"
 stop_when_no_tasks = true
 reset_on_failure = true       # restore the tree to last commit after a failed iteration
 
+# Optional: enable multi-phase SDLC execution. When set, each task passes
+# through these phases in order before it is marked Done. Remove or leave
+# empty to use the original single-phase behaviour.
+#
+# phase_sequence = ["plan", "test", "dev"]
+
 [prompts]
 loop = ".harness/prompts/loop.md"
 init = ".harness/prompts/init.md"
@@ -767,6 +824,26 @@ init = ".harness/prompts/init.md"
 [hooks]
 default = ["run_build", "run_lint", "run_unit_tests", "run_update_docs"]
 default_timeout_secs = 600
+
+# ── Phase-specific config (only needed when phase_sequence is set above) ──────
+# Each [phases.<name>] section overrides the agent command, prompt template,
+# and/or hook list for that phase. All fields are optional; omitted fields
+# fall back to the defaults above.
+#
+# [phases.plan]
+# prompt_template = ".harness/prompts/plan.md"
+# hooks            = ["validate_plan"]
+#
+# [phases.test]
+# prompt_template = ".harness/prompts/test.md"
+# hooks            = ["run_lint", "validate_tests"]
+#
+# [phases.dev]
+# hooks            = ["run_build", "run_lint", "run_unit_tests"]
+#
+# To use a different agent model per phase, set agent_command:
+# [phases.plan]
+# agent_command = "claude -p --model claude-opus-4-8 --dangerously-skip-permissions < {prompt_file}"
 "#;
 
 const GUARDRAILS_TOML: &str = r#"[budgets]
@@ -825,7 +902,7 @@ const LOOP_MD: &str = r#"# Harness Loop Prompt
 **ID:** {task_id}
 **Spec:** {spec_name}
 **Title:** {task_title}
-
+{phase_name}
 **Acceptance criteria:**
 {task_acceptance}
 

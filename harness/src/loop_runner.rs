@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-use crate::config::{load_guardrails, load_harness_config};
+use crate::config::{load_guardrails, load_harness_config, PhaseConfig};
 use crate::hooks::{
     hook_timeout, is_hook_blocking, run_hook, save_hook_log, truncate_output, HookInvocation,
 };
@@ -143,16 +143,31 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
             continue;
         }
 
+        // Determine the effective phase sequence and which phase to run next.
+        let effective_phases: Vec<String> = if task.phases.is_empty() {
+            config.loop_config.phase_sequence.clone()
+        } else {
+            task.phases.clone()
+        };
+        let current_phase: Option<String> = effective_phases
+            .iter()
+            .find(|p| !task.completed_phases.contains(*p))
+            .cloned();
+
+        let phase_cfg: Option<&PhaseConfig> =
+            current_phase.as_deref().and_then(|p| config.phases.get(p));
+
         // Compose + write prompt.
         let is_first = state.iteration_count == 0;
-        let prompt = compose_prompt(root, &config, &task, &spec_name, is_first)?;
+        let phase_template = phase_cfg.and_then(|pc| pc.prompt_template.as_deref());
+        let prompt = compose_prompt(root, &config, &task, &spec_name, is_first, current_phase.as_deref(), phase_template)?;
         let (prompt_file, prompt_hash) = write_prompt_file(&prompt)?;
 
         // Build and run the agent command (fresh process).
-        let cmd_str = config
-            .agent
-            .command
-            .replace("{prompt_file}", &prompt_file.to_string_lossy());
+        let agent_cmd = phase_cfg
+            .and_then(|pc| pc.agent_command.as_deref())
+            .unwrap_or(&config.agent.command);
+        let cmd_str = agent_cmd.replace("{prompt_file}", &prompt_file.to_string_lossy());
         let working_dir = config
             .agent
             .working_dir
@@ -188,12 +203,18 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
         }
 
         if all_blocking_passed {
-            // Verify phase: run the task's hooks (or config default) in order.
-            let hook_list = if task.hooks.is_empty() {
-                config.hooks.default.clone()
-            } else {
-                task.hooks.clone()
-            };
+            // Verify phase: run the phase's hooks, then the task's, then the
+            // config default — first non-empty list wins.
+            let hook_list = phase_cfg
+                .and_then(|pc| pc.hooks.as_ref())
+                .cloned()
+                .unwrap_or_else(|| {
+                    if task.hooks.is_empty() {
+                        config.hooks.default.clone()
+                    } else {
+                        task.hooks.clone()
+                    }
+                });
             let task_json = serde_json::to_string(&task).unwrap_or_else(|_| "{}".to_string());
 
             for hook_name in &hook_list {
@@ -257,22 +278,57 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
         let final_status: TaskStatus;
 
         if all_blocking_passed && agent_exit == 0 {
-            final_status = TaskStatus::Done;
-            if config.loop_config.commit_each_success {
-                let msg = config
-                    .loop_config
-                    .commit_message_template
-                    .replace("{task_id}", &task.id)
-                    .replace("{task_title}", &task.title);
-                match git_commit(root, &msg) {
-                    Ok(sha) => git_sha = sha,
-                    Err(e) => eprintln!("warning: git commit failed: {e:#}"),
+            // Determine if this phase advance completes the task or just unlocks
+            // the next phase.
+            let phase_advance_only: bool = if let Some(ref phase) = current_phase {
+                // Record this phase as complete.
+                {
+                    let task_mut = &mut tasks_by_spec[spec_vec_idx].1[entry.idx];
+                    task_mut.completed_phases.push(phase.clone());
                 }
+                // Check if all phases are now done.
+                let completed = &tasks_by_spec[spec_vec_idx].1[entry.idx].completed_phases;
+                !effective_phases.iter().all(|p| completed.contains(p))
+            } else {
+                false
+            };
+
+            if phase_advance_only {
+                let phase_label = current_phase.as_deref().unwrap_or("?");
+                {
+                    let task_mut = &mut tasks_by_spec[spec_vec_idx].1[entry.idx];
+                    // Keep Todo so the loop picks it up again for the next phase.
+                    task_mut.status = TaskStatus::Todo;
+                    // Reset attempt counter so the next phase gets a full budget.
+                    task_mut.attempts = 0;
+                    task_mut.updated_at = Utc::now();
+                }
+                final_status = TaskStatus::Todo;
+                append_progress(
+                    root,
+                    &format!(
+                        "- [{}] iter {iter}: task {} phase '{}' DONE — advancing",
+                        now(), task.id, phase_label
+                    ),
+                )?;
+            } else {
+                final_status = TaskStatus::Done;
+                if config.loop_config.commit_each_success {
+                    let msg = config
+                        .loop_config
+                        .commit_message_template
+                        .replace("{task_id}", &task.id)
+                        .replace("{task_title}", &task.title);
+                    match git_commit(root, &msg) {
+                        Ok(sha) => git_sha = sha,
+                        Err(e) => eprintln!("warning: git commit failed: {e:#}"),
+                    }
+                }
+                append_progress(
+                    root,
+                    &format!("- [{}] iter {iter}: task {} DONE — {}", now(), task.id, task.title),
+                )?;
             }
-            append_progress(
-                root,
-                &format!("- [{}] iter {iter}: task {} DONE — {}", now(), task.id, task.title),
-            )?;
         } else {
             // Failed attempt. Restore the working tree to the last clean commit
             // first, so this broken attempt can't poison the next task.
@@ -288,15 +344,17 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
 
             let task_mut = &mut tasks_by_spec[spec_vec_idx].1[entry.idx];
             task_mut.attempts += 1;
+            let phase_label = current_phase.as_deref().map(|p| format!(" (phase '{p}')")).unwrap_or_default();
             let summary = if agent_exit != 0 {
-                format!("agent exited {agent_exit}")
+                format!("agent exited {agent_exit}{phase_label}")
             } else {
-                hook_results
+                let hook_summary = hook_results
                     .iter()
                     .filter(|h| h.blocking && !h.passed)
                     .map(|h| format!("{} (exit {})", h.name, h.exit_code))
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", ");
+                format!("{hook_summary}{phase_label}")
             };
             let note = format!("[iter {iter}] failed: {summary}");
             task_mut.notes = Some(match &task_mut.notes {
@@ -323,7 +381,7 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
             )?;
         }
 
-        // If we passed, set the task status to Done now.
+        // If we passed all phases, mark the task Done now.
         if final_status == TaskStatus::Done {
             let task_mut = &mut tasks_by_spec[spec_vec_idx].1[entry.idx];
             task_mut.status = TaskStatus::Done;
@@ -335,6 +393,7 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
             iteration: iter,
             task_id: task.id.clone(),
             spec_name: spec_name.clone(),
+            phase: current_phase.clone(),
             prompt_hash,
             agent_exit_status: agent_exit,
             hook_results,
