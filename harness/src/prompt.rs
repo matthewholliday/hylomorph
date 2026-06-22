@@ -16,24 +16,48 @@ pub fn substitute(template: &str, vars: &[(&str, &str)]) -> String {
     result
 }
 
+/// Select and load the prompt template for this iteration.
+///
+/// Priority:
+///   1. `phase_template` path (from `[phases.<name>].prompt_template`)
+///   2. `init.md` on the very first iteration (when no phase template is set)
+///   3. `loop.md` otherwise
+fn load_template(
+    root: &Path,
+    is_first_iteration: bool,
+    phase_template: Option<&str>,
+) -> Result<String> {
+    let prompts_dir = root.join(".harness").join("prompts");
+
+    if let Some(rel) = phase_template {
+        let path = root.join(rel);
+        return fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read phase template at {:?}", path));
+    }
+
+    let init_path = prompts_dir.join("init.md");
+    if is_first_iteration && init_path.exists() {
+        return fs::read_to_string(&init_path)
+            .with_context(|| format!("Failed to read init.md at {:?}", init_path));
+    }
+
+    let loop_path = prompts_dir.join("loop.md");
+    fs::read_to_string(&loop_path)
+        .with_context(|| format!("Failed to read loop.md at {:?}", loop_path))
+}
+
 pub fn compose_prompt(
     root: &Path,
     _config: &HarnessConfig,
     task: &Task,
     spec_name: &str,
     is_first_iteration: bool,
+    // Active SDLC phase name, or None when phases are disabled.
+    phase_name: Option<&str>,
+    // Relative path to the phase-specific prompt template, if configured.
+    phase_template: Option<&str>,
 ) -> Result<String> {
-    let prompts_dir = root.join(".harness").join("prompts");
-    let init_path = prompts_dir.join("init.md");
-    let loop_path = prompts_dir.join("loop.md");
-
-    let template = if is_first_iteration && init_path.exists() {
-        fs::read_to_string(&init_path)
-            .with_context(|| format!("Failed to read init.md at {:?}", init_path))?
-    } else {
-        fs::read_to_string(&loop_path)
-            .with_context(|| format!("Failed to read loop.md at {:?}", loop_path))?
-    };
+    let template = load_template(root, is_first_iteration, phase_template)?;
 
     let progress = read_progress(root).unwrap_or_default();
 
@@ -79,6 +103,7 @@ pub fn compose_prompt(
 
     let task_acceptance = task.acceptance.join("\n");
     let task_files_hint = task.files_hint.join(", ");
+    let phase_name_str = phase_name.unwrap_or("");
 
     let vars: &[(&str, &str)] = &[
         ("task_id", &task.id),
@@ -90,13 +115,20 @@ pub fn compose_prompt(
         ("rules", &rules),
         ("requirements", &requirements_json),
         ("design_excerpt", &design_excerpt),
+        ("phase_name", phase_name_str),
     ];
 
     let mut body = substitute(&template, vars);
 
+    let phase_header = if let Some(p) = phase_name {
+        format!("\n**Phase:** {p}")
+    } else {
+        String::new()
+    };
     let footer = format!(
-        "\n\n## Your task\nID: {}\nTitle: {}\nAcceptance:\n{}\n\nDo ONLY this task. Leave the project buildable. Update .harness/logs/progress.md with what you did. Then stop.\n\n**Do not modify any file under `.specs/` or `.harness/` (other than `.harness/logs/progress.md`). The harness will fail this iteration if you do.**",
+        "\n\n## Your task\nID: {}{}\nTitle: {}\nAcceptance:\n{}\n\nDo ONLY this task. Leave the project buildable. Update .harness/logs/progress.md with what you did. Then stop.\n\n**Do not modify any file under `.specs/` or `.harness/` (other than `.harness/logs/progress.md`). The harness will fail this iteration if you do.**",
         task.id,
+        phase_header,
         task.title,
         task_acceptance,
     );

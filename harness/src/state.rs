@@ -31,6 +31,8 @@ pub struct IterationRecord {
     pub iteration: u64,
     pub task_id: String,
     pub spec_name: String,
+    /// Which SDLC phase ran in this iteration, or None when phases are disabled.
+    pub phase: Option<String>,
     pub prompt_hash: String,
     pub agent_exit_status: i32,
     pub hook_results: Vec<HookResult>,

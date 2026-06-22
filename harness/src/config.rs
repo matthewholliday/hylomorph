@@ -3,6 +3,24 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+// ── PhaseConfig ───────────────────────────────────────────────────────────────
+
+/// Configuration for a single SDLC phase (e.g. "plan", "test", "dev").
+/// All fields are optional; omitted fields fall back to the harness defaults.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct PhaseConfig {
+    /// Override the agent command for this phase. Supports `{prompt_file}`.
+    #[serde(default)]
+    pub agent_command: Option<String>,
+    /// Path to a phase-specific prompt template file.
+    #[serde(default)]
+    pub prompt_template: Option<String>,
+    /// Hooks to run after the agent. If absent, falls back to task hooks then
+    /// `[hooks].default`.
+    #[serde(default)]
+    pub hooks: Option<Vec<String>>,
+}
+
 // ── HarnessConfig ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -38,6 +56,11 @@ pub struct LoopConfig {
     /// so a broken attempt can't poison subsequent tasks. Default: true.
     #[serde(default = "default_reset_on_failure")]
     pub reset_on_failure: bool,
+    /// Ordered list of phase names every task must pass through before being
+    /// marked Done. Empty (the default) disables phase-based execution and
+    /// restores the original single-agent-per-task behaviour.
+    #[serde(default)]
+    pub phase_sequence: Vec<String>,
 }
 
 fn default_reset_on_failure() -> bool {
@@ -64,6 +87,7 @@ impl Default for LoopConfig {
             commit_message_template: default_commit_message_template(),
             stop_when_no_tasks: default_stop_when_no_tasks(),
             reset_on_failure: default_reset_on_failure(),
+            phase_sequence: Vec::new(),
         }
     }
 }
@@ -124,6 +148,9 @@ pub struct HarnessConfig {
     pub prompts: PromptsConfig,
     #[serde(default)]
     pub hooks: HooksConfig,
+    /// Per-phase configuration, keyed by phase name (e.g. "plan", "test", "dev").
+    #[serde(default)]
+    pub phases: HashMap<String, PhaseConfig>,
 }
 
 // TOML uses [loop] but "loop" is a Rust keyword, so we use an intermediate raw struct.
@@ -134,6 +161,8 @@ struct RawHarnessConfig {
     loop_config: Option<LoopConfig>,
     prompts: Option<PromptsConfig>,
     hooks: Option<HooksConfig>,
+    #[serde(default)]
+    phases: HashMap<String, PhaseConfig>,
 }
 
 // ── GuardrailsConfig ──────────────────────────────────────────────────────────
@@ -256,6 +285,7 @@ pub fn load_harness_config(root: &Path) -> Result<HarnessConfig> {
         loop_config: raw.loop_config.unwrap_or_default(),
         prompts: raw.prompts.unwrap_or_default(),
         hooks: raw.hooks.unwrap_or_default(),
+        phases: raw.phases,
     })
 }
 

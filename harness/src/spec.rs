@@ -37,6 +37,14 @@ pub struct Task {
     pub max_attempts: u32,
     #[serde(default)]
     pub notes: Option<String>,
+    /// Optional task-specific phase sequence. When non-empty, overrides
+    /// `[loop].phase_sequence` from harness.toml for this task only.
+    #[serde(default)]
+    pub phases: Vec<String>,
+    /// Managed by the harness. Records which phases have passed for this task.
+    /// Reset to [] when the task is reset to Todo after a full failure.
+    #[serde(default)]
+    pub completed_phases: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
