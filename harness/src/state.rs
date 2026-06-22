@@ -115,6 +115,28 @@ pub fn append_progress(root: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Prune old iteration log files so at most `max_files` remain.
+/// Files are sorted by name (timestamp prefix), so oldest are removed first.
+pub fn prune_iteration_logs(root: &Path, max_files: usize) -> Result<()> {
+    let dir = root.join(".harness").join("logs").join("iterations");
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let mut entries: Vec<_> = fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |x| x == "json"))
+        .collect();
+    if entries.len() <= max_files {
+        return Ok(());
+    }
+    entries.sort_by_key(|e| e.file_name());
+    let to_remove = entries.len() - max_files;
+    for entry in entries.iter().take(to_remove) {
+        fs::remove_file(entry.path()).ok();
+    }
+    Ok(())
+}
+
 pub fn read_progress(root: &Path) -> Result<String> {
     let path = root.join(".harness").join("logs").join("progress.md");
     if !path.exists() {
