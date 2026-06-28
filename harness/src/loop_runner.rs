@@ -11,6 +11,7 @@ use crate::config::{load_guardrails, load_harness_config, PhaseConfig};
 use crate::hooks::{
     hook_timeout, is_hook_blocking, run_hook, save_hook_log, truncate_output, HookInvocation,
 };
+use crate::manifest::record_spec;
 use crate::prompt::{compose_prompt, write_prompt_file};
 use crate::spec::{list_specs, load_tasks, save_tasks, spec_dir, Task, TaskStatus};
 use crate::state::{
@@ -32,8 +33,8 @@ struct PoolEntry {
     idx: usize,
 }
 
-/// Build a GlobSet from a list of deny patterns for write-protection checks.
-fn build_deny_set(patterns: &[String]) -> Option<GlobSet> {
+/// Build a GlobSet from a list of patterns; silently skips malformed entries.
+fn build_globset(patterns: &[String]) -> Option<GlobSet> {
     if patterns.is_empty() {
         return None;
     }
@@ -41,7 +42,7 @@ fn build_deny_set(patterns: &[String]) -> Option<GlobSet> {
     for pat in patterns {
         match GlobBuilder::new(pat).build() {
             Ok(g) => { builder.add(g); }
-            Err(_) => {} // skip malformed patterns silently
+            Err(_) => {}
         }
     }
     builder.build().ok()
@@ -115,8 +116,10 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
         }
     }
 
-    // Build the deny GlobSet from guardrails once; reused each iteration.
-    let deny_set = build_deny_set(&guardrails.writes.deny);
+    // Build glob sets from guardrails once; reused each iteration.
+    let deny_set = build_globset(&guardrails.writes.deny);
+    let allow_set = build_globset(&guardrails.writes.allow);
+    let protected_extra = build_globset(&guardrails.protected.paths);
 
     // Effective iteration budget: min of config, guardrails, and CLI override.
     let mut budget = config.loop_config.max_iterations as u64;
@@ -256,15 +259,28 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
             all_blocking_passed = false;
             agent_failure = true;
         } else {
-            // Guard: reject any writes to spec or harness config/prompt/script files,
-            // and any writes matching the guardrails [writes].deny patterns.
-            let violations = check_protected_writes(root, deny_set.as_ref());
+            // Guard: reject writes to protected paths and [writes].deny patterns.
+            let violations = check_protected_writes(root, deny_set.as_ref(), protected_extra.as_ref());
             if !violations.is_empty() {
                 eprintln!(
                     "error: agent wrote to protected path(s) — failing iteration:\n{}",
                     violations.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n")
                 );
                 all_blocking_passed = false;
+            }
+
+            // Phase 1: task-ownership enforcement.
+            // If the task declares files_hint AND enforce_ownership is on, any
+            // changed file outside files_hint ∪ allow patterns fails the iteration.
+            if all_blocking_passed && guardrails.enforce_ownership && !task.files_hint.is_empty() {
+                let ownership_violations = check_ownership_writes(root, &task.files_hint, allow_set.as_ref());
+                if !ownership_violations.is_empty() {
+                    eprintln!(
+                        "error: agent wrote outside task ownership boundary — failing iteration:\n{}",
+                        ownership_violations.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n")
+                    );
+                    all_blocking_passed = false;
+                }
             }
         }
 
@@ -363,9 +379,7 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
                 let phase_label = current_phase.as_deref().unwrap_or("?");
                 {
                     let task_mut = &mut tasks_by_spec[spec_vec_idx].1[entry.idx];
-                    // Keep Todo so the loop picks it up again for the next phase.
                     task_mut.status = TaskStatus::Todo;
-                    // Reset attempt counter so the next phase gets a full budget.
                     task_mut.attempts = 0;
                     task_mut.updated_at = Utc::now();
                 }
@@ -379,6 +393,10 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
                 )?;
             } else {
                 final_status = TaskStatus::Done;
+                // Phase 0: record manifest after each successfully completed task.
+                if let Err(e) = record_spec(root, &spec_name) {
+                    eprintln!("warning: manifest record failed for spec '{spec_name}': {e:#}");
+                }
                 if config.loop_config.commit_each_success {
                     let msg = config
                         .loop_config
@@ -634,26 +652,43 @@ fn print_summary(done: usize, blocked: usize, remaining: usize, elapsed_secs: u6
     }
 }
 
-/// Return a list of paths the agent modified that fall under protected areas:
-///   - `.specs/`  (spec source of truth — never agent-writable)
-///   - `.harness/` except `.harness/logs/` (config, guardrails, prompts, scripts)
-///   - any path matching the `[writes].deny` patterns from guardrails.toml
+/// Return every path the agent modified that falls in a protected area:
+///   - `.specs/`            — spec source of truth
+///   - `evals/`             — human-authored eval oracles (Phase 2)
+///   - `.harness/` except `.harness/logs/`
+///   - `.harness/manifest.json`
+///   - `.git/`
+///   - any path matching guardrails `[writes].deny` patterns
+///   - any path matching the `[protected].paths` extra block
 ///
-/// Checks both tracked-file diffs (via `git diff --name-only HEAD`) and new
-/// untracked files (via `git ls-files --others --exclude-standard`).
-/// On a fresh repo with no HEAD, the diff step is skipped gracefully.
-fn check_protected_writes(root: &Path, deny_set: Option<&GlobSet>) -> Vec<String> {
-    fn is_protected(path: &str, deny_set: Option<&GlobSet>) -> bool {
-        // Block anything under .specs/
+/// Checks both tracked-file diffs and new untracked files.
+fn check_protected_writes(
+    root: &Path,
+    deny_set: Option<&GlobSet>,
+    protected_extra: Option<&GlobSet>,
+) -> Vec<String> {
+    fn is_protected(path: &str, deny_set: Option<&GlobSet>, extra: Option<&GlobSet>) -> bool {
         if path.starts_with(".specs/") || path == ".specs" {
             return true;
         }
-        // Block .harness/ except .harness/logs/
+        if path.starts_with("evals/") || path == "evals" {
+            return true;
+        }
+        if path.starts_with(".git/") || path == ".git" {
+            return true;
+        }
+        if path == ".harness/manifest.json" {
+            return true;
+        }
         if path.starts_with(".harness/") && !path.starts_with(".harness/logs/") {
             return true;
         }
-        // Apply guardrails [writes].deny glob patterns.
         if let Some(set) = deny_set {
+            if set.is_match(path) {
+                return true;
+            }
+        }
+        if let Some(set) = extra {
             if set.is_match(path) {
                 return true;
             }
@@ -663,7 +698,6 @@ fn check_protected_writes(root: &Path, deny_set: Option<&GlobSet>) -> Vec<String
 
     let mut violations = Vec::new();
 
-    // Check whether HEAD exists; on fresh repos git diff HEAD errors out.
     let has_head = Command::new("git")
         .args(["rev-parse", "--verify", "HEAD"])
         .current_dir(root)
@@ -672,7 +706,6 @@ fn check_protected_writes(root: &Path, deny_set: Option<&GlobSet>) -> Vec<String
         .unwrap_or(false);
 
     if has_head {
-        // Modified tracked files vs HEAD.
         if let Ok(out) = Command::new("git")
             .args(["diff", "--name-only", "HEAD"])
             .current_dir(root)
@@ -680,14 +713,13 @@ fn check_protected_writes(root: &Path, deny_set: Option<&GlobSet>) -> Vec<String
         {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 let p = line.trim();
-                if !p.is_empty() && is_protected(p, deny_set) {
+                if !p.is_empty() && is_protected(p, deny_set, protected_extra) {
                     violations.push(p.to_string());
                 }
             }
         }
     }
 
-    // New untracked files (works on fresh repos too).
     if let Ok(out) = Command::new("git")
         .args(["ls-files", "--others", "--exclude-standard"])
         .current_dir(root)
@@ -695,7 +727,70 @@ fn check_protected_writes(root: &Path, deny_set: Option<&GlobSet>) -> Vec<String
     {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
             let p = line.trim();
-            if !p.is_empty() && is_protected(p, deny_set) {
+            if !p.is_empty() && is_protected(p, deny_set, protected_extra) {
+                violations.push(p.to_string());
+            }
+        }
+    }
+
+    violations
+}
+
+/// Phase 1: verify every changed file is within the task's ownership boundary.
+/// Returns paths that are out-of-scope (agent wrote outside files_hint ∪ allow).
+fn check_ownership_writes(
+    root: &Path,
+    files_hint: &[String],
+    allow_set: Option<&GlobSet>,
+) -> Vec<String> {
+    let ownership_set = build_globset(files_hint);
+
+    fn in_scope(path: &str, ownership: Option<&GlobSet>, allow: Option<&GlobSet>) -> bool {
+        if let Some(set) = ownership {
+            if set.is_match(path) {
+                return true;
+            }
+        }
+        if let Some(set) = allow {
+            if set.is_match(path) {
+                return true;
+            }
+        }
+        false
+    }
+
+    let mut violations = Vec::new();
+
+    let has_head = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if has_head {
+        if let Ok(out) = Command::new("git")
+            .args(["diff", "--name-only", "HEAD"])
+            .current_dir(root)
+            .output()
+        {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let p = line.trim();
+                if !p.is_empty() && !in_scope(p, ownership_set.as_ref(), allow_set) {
+                    violations.push(p.to_string());
+                }
+            }
+        }
+    }
+
+    if let Ok(out) = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(root)
+        .output()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let p = line.trim();
+            if !p.is_empty() && !in_scope(p, ownership_set.as_ref(), allow_set) {
                 violations.push(p.to_string());
             }
         }
