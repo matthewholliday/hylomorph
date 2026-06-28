@@ -6,18 +6,20 @@ mod prompt;
 mod spec;
 mod state;
 mod tui;
+mod util;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::{find_project_root, load_harness_config};
 use crate::hooks::{run_hook, HookInvocation};
 use crate::loop_runner::{run, RunOptions};
 use crate::manifest::{check_spec, record_spec, DriftKind};
+use crate::prompt::compose_prompt;
 use crate::spec::{list_specs, load_requirements, load_tasks, save_tasks, spec_dir, Task, TaskStatus};
 use crate::state::load_state;
 
@@ -33,16 +35,95 @@ enum Commands {
     /// Scaffold .harness/ in the current directory.
     Init {
         #[arg(long)]
-        from_specs: bool,
+        force: bool,
+    },
+    /// Render code from a spec, task by task (incremental, non-destructive).
+    Build {
+        /// Spec to build. Omit (or use --all) to build every spec.
+        spec: Option<String>,
+        #[arg(long)]
+        all: bool,
+        /// Run a single iteration; surface agent failure as exit 3.
+        #[arg(long)]
+        once: bool,
+        /// Maximum number of iterations.
+        #[arg(long)]
+        max: Option<u64>,
+        /// Preview task selection without invoking the agent.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Burn a spec's owned files and re-render from the spec (destructive, eval-gated).
+    Rebuild {
+        /// Spec to rebuild. Required unless --all is given.
+        spec: Option<String>,
+        #[arg(long)]
+        all: bool,
+        /// Only burn/rebuild files matching this glob (subset of spec ownership).
+        #[arg(long)]
+        only: Option<String>,
+        /// Override the pace_layer="never" guard.
         #[arg(long)]
         force: bool,
     },
-    /// Manage specs.
+    /// The invariant gate: spec well-formed + eval coverage + no drift.
+    Check {
+        /// Spec to check. Omit to check all specs.
+        spec: Option<String>,
+        #[arg(long)]
+        all: bool,
+        /// Reconstruct the spec from code and report convergence (advisory).
+        #[arg(long)]
+        reverse: bool,
+        /// Rebuild twice and compare eval results (spec-tightness probe; destructive).
+        #[arg(long)]
+        determinism: bool,
+        /// Accept the current code as this spec's baseline (escape hatch).
+        #[arg(long)]
+        accept: bool,
+    },
+    /// Author and inspect specs (the source of truth).
     Spec {
         #[command(subcommand)]
         cmd: SpecCmd,
     },
-    /// Run the Ralph loop.
+    /// Manage and run evals (the acceptance oracle).
+    Eval {
+        #[command(subcommand)]
+        cmd: EvalCmd,
+    },
+    /// Manage and run gates (blocking validation hooks).
+    Gate {
+        #[command(subcommand)]
+        cmd: GateCmd,
+    },
+    /// Show current loop status.
+    Status,
+    /// Live terminal dashboard that watches a run as it happens.
+    Watch,
+    /// Inspect iteration logs.
+    Log {
+        /// Iteration number to show. Omit to list all.
+        n: Option<u64>,
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// Validate environment and config (agent adapter, gates, git).
+    Doctor,
+    /// Preview the exact prompt the agent would receive for a task (no run).
+    Explain {
+        /// Task id to preview (e.g. T-003).
+        task: String,
+        /// Spec to look in. Omit to search all specs.
+        #[arg(long)]
+        spec: Option<String>,
+        /// Override the phase whose prompt to compose (default: next pending phase).
+        #[arg(long)]
+        phase: Option<String>,
+    },
+
+    // ── deprecated aliases (hidden) ──────────────────────────────────────────
+    #[command(hide = true)]
     Run {
         #[arg(long)]
         spec: Option<String>,
@@ -53,73 +134,93 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Inspect/run hooks.
+    #[command(hide = true)]
+    Regen {
+        spec: String,
+        #[arg(long)]
+        component: Option<String>,
+        #[arg(long)]
+        twice: bool,
+        #[arg(long)]
+        force_boundary: bool,
+    },
+    #[command(hide = true)]
+    Manifest {
+        #[command(subcommand)]
+        cmd: ManifestCmd,
+    },
+    #[command(hide = true)]
     Hooks {
         #[command(subcommand)]
-        cmd: HooksCmd,
+        cmd: GateCmd,
     },
-    /// Show current loop status.
-    Status,
-    /// Live terminal dashboard that watches a run as it happens.
-    Watch,
-    /// Inspect iteration/hook logs.
+    #[command(hide = true)]
     Logs {
         #[arg(long)]
         iteration: Option<u64>,
         #[arg(long)]
         follow: bool,
     },
-    /// Validate config, hooks, agent adapter, git.
-    Doctor,
-    /// Manage the spec ownership manifest (Phase 0).
-    Manifest {
-        #[command(subcommand)]
-        cmd: ManifestCmd,
-    },
-    /// Regenerate owned artifacts from a spec (Phase 3 — burn & rebuild).
-    Regen {
-        /// Spec to regenerate.
-        spec: String,
-        /// Only burn/rebuild files matching this glob (subset of spec ownership).
-        #[arg(long)]
-        component: Option<String>,
-        /// Regenerate twice and compare eval results for a determinism probe.
-        #[arg(long)]
-        twice: bool,
-        /// Bypass the pace_layer="never" guard.
-        #[arg(long)]
-        force_boundary: bool,
-    },
+}
+
+#[derive(ValueEnum, Clone, Copy)]
+enum SpecPart {
+    Requirements,
+    Design,
+    Tasks,
 }
 
 #[derive(Subcommand)]
 enum SpecCmd {
-    List,
-    Draft {
+    /// List specs under .specs/.
+    Ls,
+    /// Draft a new spec from a brief (agent-assisted).
+    New {
         name: String,
         /// Inline brief: what the spec should do (quoted string).
         #[arg(long)]
         brief: Option<String>,
-        /// Path to a brief file (.md, .txt, or any text). Use `-` for stdin.
+        /// Brief file (.md/.txt/any text), or `-` for stdin.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
+    /// Open a spec file in $EDITOR, then check it.
+    Edit {
+        name: String,
+        /// Which part to edit (default: requirements).
+        part: Option<SpecPart>,
+    },
+    /// Print a spec's resolved contents.
+    Show {
+        name: String,
+    },
+    /// Report requirement↔task coverage; --fix writes task stubs.
+    Tasks {
+        name: String,
+        #[arg(long)]
+        fix: bool,
+    },
+
+    // ── deprecated aliases (hidden) ──────────────────────────────────────────
+    #[command(hide = true)]
+    List,
+    #[command(hide = true)]
+    Draft {
+        name: String,
+        #[arg(long)]
+        brief: Option<String>,
         #[arg(long)]
         from: Option<PathBuf>,
         #[arg(long)]
         interactive: bool,
     },
-    Edit {
-        name: String,
-        #[arg(long)]
-        requirements: bool,
-        #[arg(long)]
-        design: bool,
-        #[arg(long)]
-        tasks: bool,
-    },
+    #[command(hide = true)]
     Validate {
         name: Option<String>,
         #[arg(long)]
         all: bool,
     },
+    #[command(hide = true)]
     Sync {
         name: String,
         #[arg(long)]
@@ -132,14 +233,20 @@ enum SpecCmd {
 }
 
 #[derive(Subcommand)]
+enum EvalCmd {
+    /// List eval scripts for a spec.
+    Ls { spec: String },
+    /// Run a spec's evals against the current code.
+    Run { spec: String },
+}
+
+#[derive(Subcommand)]
 enum ManifestCmd {
-    /// Recompute and store the manifest for a spec (or all specs with --all).
     Record {
         spec: Option<String>,
         #[arg(long)]
         all: bool,
     },
-    /// Check for ownership drift; exits non-zero if any drift is found.
     Check {
         spec: Option<String>,
         #[arg(long)]
@@ -148,13 +255,19 @@ enum ManifestCmd {
 }
 
 #[derive(Subcommand)]
-enum HooksCmd {
-    List,
+enum GateCmd {
+    /// List gate scripts.
+    Ls,
+    /// Verify gate scripts exist, are executable, and are all wired up.
+    Check,
+    /// Run one gate manually.
     Run {
-        hook: String,
+        gate: String,
         #[arg(long)]
         task: Option<String>,
     },
+    #[command(hide = true)]
+    List,
 }
 
 fn main() {
@@ -169,37 +282,60 @@ fn main() {
     std::process::exit(code);
 }
 
+fn deprecate(old: &str, new: &str) {
+    eprintln!("note: '{old}' is deprecated — use '{new}' (see `harness --help`)");
+}
+
+/// Resolve the set of specs a command should act on.
+/// `default_all` controls the no-argument behaviour: read-only commands default
+/// to every spec; destructive commands require an explicit target.
+fn resolve_specs(
+    root: &Path,
+    spec: Option<String>,
+    all: bool,
+    default_all: bool,
+) -> Result<Vec<String>> {
+    if all {
+        list_specs(root)
+    } else if let Some(name) = spec {
+        Ok(vec![name])
+    } else if default_all {
+        list_specs(root)
+    } else {
+        anyhow::bail!("provide a spec name or --all");
+    }
+}
+
 fn dispatch(cli: Cli) -> Result<i32> {
     match cli.command {
-        Commands::Init { from_specs, force } => {
+        Commands::Init { force } => {
             let root = std::env::current_dir()?;
-            cmd_init(&root, from_specs, force)?;
+            cmd_init(&root, false, force)?;
             Ok(0)
         }
-        Commands::Run {
-            spec,
-            once,
-            max_iterations,
-            dry_run,
-        } => {
+        Commands::Build { spec, all, once, max, dry_run } => {
             let root = find_project_root()?;
-            run(
-                &root,
-                RunOptions {
-                    spec_filter: spec,
-                    once,
-                    max_iterations,
-                    dry_run,
-                },
-            )
+            cmd_build(&root, spec, all, once, max, dry_run)
+        }
+        Commands::Rebuild { spec, all, only, force } => {
+            let root = find_project_root()?;
+            cmd_rebuild(&root, spec, all, only.as_deref(), force, false)
+        }
+        Commands::Check { spec, all, reverse, determinism, accept } => {
+            let root = find_project_root()?;
+            cmd_check(&root, spec, all, reverse, determinism, accept)
         }
         Commands::Spec { cmd } => {
             let root = find_project_root()?;
             cmd_spec(&root, cmd)
         }
-        Commands::Hooks { cmd } => {
+        Commands::Eval { cmd } => {
             let root = find_project_root()?;
-            cmd_hooks(&root, cmd)
+            cmd_eval(&root, cmd)
+        }
+        Commands::Gate { cmd } => {
+            let root = find_project_root()?;
+            cmd_gate(&root, cmd)
         }
         Commands::Status => {
             let root = find_project_root()?;
@@ -209,23 +345,188 @@ fn dispatch(cli: Cli) -> Result<i32> {
             let root = find_project_root()?;
             tui::run(&root)
         }
-        Commands::Logs { iteration, follow } => {
+        Commands::Log { n, follow } => {
             let root = find_project_root()?;
-            cmd_logs(&root, iteration, follow)
+            cmd_logs(&root, n, follow)
         }
         Commands::Doctor => {
             let root = find_project_root()?;
             cmd_doctor(&root)
         }
-        Commands::Manifest { cmd } => {
+        Commands::Explain { task, spec, phase } => {
             let root = find_project_root()?;
-            cmd_manifest(&root, cmd)
+            cmd_explain(&root, &task, spec.as_deref(), phase.as_deref())
+        }
+
+        // ── deprecated aliases ───────────────────────────────────────────────
+        Commands::Run { spec, once, max_iterations, dry_run } => {
+            deprecate("run", "build");
+            let root = find_project_root()?;
+            cmd_build(&root, spec, false, once, max_iterations, dry_run)
         }
         Commands::Regen { spec, component, twice, force_boundary } => {
+            deprecate("regen", "rebuild");
             let root = find_project_root()?;
-            cmd_regen(&root, &spec, component.as_deref(), twice, force_boundary)
+            cmd_rebuild(&root, Some(spec), false, component.as_deref(), force_boundary, twice)
+        }
+        Commands::Manifest { cmd } => {
+            let root = find_project_root()?;
+            match cmd {
+                ManifestCmd::Record { spec, all } => {
+                    deprecate("manifest record", "check --accept");
+                    cmd_check(&root, spec, all, false, false, true)
+                }
+                ManifestCmd::Check { spec, all } => {
+                    deprecate("manifest check", "check");
+                    cmd_check(&root, spec, all, false, false, false)
+                }
+            }
+        }
+        Commands::Hooks { cmd } => {
+            deprecate("hooks", "gate");
+            let root = find_project_root()?;
+            cmd_gate(&root, cmd)
+        }
+        Commands::Logs { iteration, follow } => {
+            deprecate("logs", "log");
+            let root = find_project_root()?;
+            cmd_logs(&root, iteration, follow)
         }
     }
+}
+
+// ─── build / rebuild / check ─────────────────────────────────────────────────
+
+fn cmd_build(
+    root: &Path,
+    spec: Option<String>,
+    all: bool,
+    once: bool,
+    max: Option<u64>,
+    dry_run: bool,
+) -> Result<i32> {
+    // `--all` (or no spec) means "every in-scope spec" → no filter.
+    let spec_filter = if all { None } else { spec };
+    run(
+        root,
+        RunOptions {
+            spec_filter,
+            once,
+            max_iterations: max,
+            dry_run,
+        },
+    )
+}
+
+/// Burn & re-render one or more specs. `twice` runs the determinism probe.
+fn cmd_rebuild(
+    root: &Path,
+    spec: Option<String>,
+    all: bool,
+    only: Option<&str>,
+    force: bool,
+    twice: bool,
+) -> Result<i32> {
+    let specs = resolve_specs(root, spec, all, false)?;
+    let mut worst = 0;
+    for name in &specs {
+        let code = cmd_regen(root, name, only, twice, force)?;
+        if code != 0 {
+            worst = code;
+        }
+    }
+    Ok(worst)
+}
+
+fn print_drift(name: &str, drift: &DriftKind) {
+    match drift {
+        DriftKind::Unrecorded { .. } => println!(
+            "✗ {name}: no baseline — run `harness rebuild {name}` or `harness check {name} --accept`"
+        ),
+        DriftKind::StaleCode { .. } => {
+            println!("✗ {name}: spec changed, code not rebuilt — run `harness rebuild {name}`")
+        }
+        DriftKind::CodeDrift { path } => {
+            println!("✗ {name}: hand-edit detected in owned file: {path}")
+        }
+        DriftKind::Missing { path } => {
+            println!("✗ {name}: owned file missing: {path} — run `harness rebuild {name}`")
+        }
+    }
+}
+
+fn cmd_check(
+    root: &Path,
+    spec: Option<String>,
+    all: bool,
+    reverse: bool,
+    determinism: bool,
+    accept: bool,
+) -> Result<i32> {
+    let specs = resolve_specs(root, spec, all, true)?;
+    if specs.is_empty() {
+        println!("No specs found under .specs/");
+        return Ok(0);
+    }
+
+    // Accept: adopt current code as the baseline (escape hatch / migration).
+    if accept {
+        for name in &specs {
+            record_spec(root, name)
+                .with_context(|| format!("recording baseline for '{name}'"))?;
+            println!("✓ accepted current code as baseline for '{name}'");
+        }
+        return Ok(0);
+    }
+
+    // Reverse: reconstruct the spec from code and emit a convergence verdict.
+    if reverse {
+        for name in &specs {
+            cmd_sync_against_code(root, name)?;
+        }
+        return Ok(0);
+    }
+
+    // Determinism: rebuild twice and compare eval results (destructive).
+    if determinism {
+        let mut worst = 0;
+        for name in &specs {
+            let code = cmd_regen(root, name, None, true, false)?;
+            if code != 0 {
+                worst = code;
+            }
+        }
+        return Ok(worst);
+    }
+
+    // Default: spec well-formedness + eval coverage + manifest drift.
+    let mut ok = true;
+    for name in &specs {
+        let mut spec_ok = true;
+        if let Err(e) = validate_spec(root, name) {
+            eprintln!("✗ {name}: {e:#}");
+            spec_ok = false;
+        }
+        match check_spec(root, name) {
+            Ok(result) if result.is_clean() => {}
+            Ok(result) => {
+                spec_ok = false;
+                for drift in &result.drifts {
+                    print_drift(name, drift);
+                }
+            }
+            Err(e) => {
+                spec_ok = false;
+                println!("✗ {name}: check error: {e:#}");
+            }
+        }
+        if spec_ok {
+            println!("✓ {name}: consistent");
+        } else {
+            ok = false;
+        }
+    }
+    Ok(if ok { 0 } else { 2 })
 }
 
 // ─── init ──────────────────────────────────────────────────────────────────
@@ -275,7 +576,7 @@ fn cmd_init(root: &Path, _from_specs: bool, force: bool) -> Result<()> {
     std::fs::create_dir_all(harness.join("logs").join("hooks"))?;
     std::fs::create_dir_all(harness.join("roundtrip"))?;
 
-    // Phase 0: install a git pre-commit hook that runs `harness manifest check --all`.
+    // Phase 0: install a git pre-commit hook that runs `harness check --all`.
     let git_hooks_dir = root.join(".git").join("hooks");
     if git_hooks_dir.is_dir() {
         let pre_commit = git_hooks_dir.join("pre-commit");
@@ -333,7 +634,7 @@ fn make_executable(_path: &Path) -> Result<()> {
 
 fn cmd_spec(root: &Path, cmd: SpecCmd) -> Result<i32> {
     match cmd {
-        SpecCmd::List => {
+        SpecCmd::Ls | SpecCmd::List => {
             let specs = list_specs(root)?;
             if specs.is_empty() {
                 println!("No specs found under .specs/");
@@ -344,66 +645,26 @@ fn cmd_spec(root: &Path, cmd: SpecCmd) -> Result<i32> {
             }
             Ok(0)
         }
+        SpecCmd::New { name, brief, from } => cmd_spec_draft(root, &name, brief, from, false),
         SpecCmd::Draft { name, brief, from, interactive } => {
+            deprecate("spec draft", "spec new");
             cmd_spec_draft(root, &name, brief, from, interactive)
         }
-        SpecCmd::Edit {
-            name,
-            requirements,
-            design,
-            tasks,
-        } => {
-            let dir = spec_dir(root, &name);
-            let file = if requirements {
-                dir.join("1-requirements.json")
-            } else if design {
-                dir.join("2-design.md")
-            } else if tasks {
-                dir.join("3-tasks.jsonl")
-            } else {
-                dir.join("1-requirements.json")
-            };
-            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-            if let Err(e) = Command::new(&editor).arg(&file).status() {
-                eprintln!("failed to launch editor '{editor}': {e}");
-            }
-            match validate_spec(root, &name) {
-                Ok(_) => Ok(0),
-                Err(e) => {
-                    eprintln!("✗ {name}: {e:#}");
-                    Ok(1)
-                }
-            }
+        SpecCmd::Edit { name, part } => cmd_spec_edit(root, &name, part),
+        SpecCmd::Show { name } => cmd_spec_show(root, &name),
+        SpecCmd::Tasks { name, fix } => {
+            cmd_sync(root, &name, fix, false)?;
+            Ok(0)
         }
         SpecCmd::Validate { name, all } => {
-            if all {
-                let mut ok = true;
-                for s in list_specs(root)? {
-                    if let Err(e) = validate_spec(root, &s) {
-                        eprintln!("✗ {s}: {e:#}");
-                        ok = false;
-                    } else {
-                        println!("✓ {s}");
-                    }
-                }
-                Ok(if ok { 0 } else { 1 })
-            } else if let Some(n) = name {
-                match validate_spec(root, &n) {
-                    Ok(_) => {
-                        println!("✓ {n} is valid");
-                        Ok(0)
-                    }
-                    Err(e) => {
-                        eprintln!("✗ {n}: {e:#}");
-                        Ok(1)
-                    }
-                }
-            } else {
-                eprintln!("provide a spec name or --all");
-                Ok(1)
-            }
+            deprecate("spec validate", "check");
+            cmd_check(root, name, all, false, false, false)
         }
         SpecCmd::Sync { name, write, regen_tasks, against_code } => {
+            deprecate(
+                "spec sync",
+                if against_code { "check --reverse" } else { "spec tasks" },
+            );
             if against_code {
                 cmd_sync_against_code(root, &name)?;
             } else {
@@ -412,6 +673,42 @@ fn cmd_spec(root: &Path, cmd: SpecCmd) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+fn cmd_spec_edit(root: &Path, name: &str, part: Option<SpecPart>) -> Result<i32> {
+    let dir = spec_dir(root, name);
+    let file = match part.unwrap_or(SpecPart::Requirements) {
+        SpecPart::Requirements => dir.join("1-requirements.json"),
+        SpecPart::Design => dir.join("2-design.md"),
+        SpecPart::Tasks => dir.join("3-tasks.jsonl"),
+    };
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    if let Err(e) = Command::new(&editor).arg(&file).status() {
+        eprintln!("failed to launch editor '{editor}': {e}");
+    }
+    match validate_spec(root, name) {
+        Ok(_) => Ok(0),
+        Err(e) => {
+            eprintln!("✗ {name}: {e:#}");
+            Ok(1)
+        }
+    }
+}
+
+fn cmd_spec_show(root: &Path, name: &str) -> Result<i32> {
+    let dir = spec_dir(root, name);
+    if !dir.exists() {
+        anyhow::bail!("spec '{name}' not found");
+    }
+    for f in ["1-requirements.json", "2-design.md", "3-tasks.jsonl"] {
+        println!("── {f} ──");
+        match std::fs::read_to_string(dir.join(f)) {
+            Ok(s) => println!("{}", s.trim_end()),
+            Err(_) => println!("(missing)"),
+        }
+        println!();
+    }
+    Ok(0)
 }
 
 fn cmd_spec_draft(
@@ -523,16 +820,16 @@ fn cmd_spec_draft(
         Ok(()) => {
             println!("✓ .specs/{name}/ is valid\n");
             println!("Next steps:");
-            println!("  harness spec validate {name}   # re-check any edits");
-            println!("  harness spec sync {name}       # drift report");
-            println!("  harness run --spec {name} --dry-run --once");
-            println!("  harness run --spec {name}");
+            println!("  harness check {name}                # re-check any edits");
+            println!("  harness spec tasks {name}           # requirement↔task coverage");
+            println!("  harness build {name} --dry-run --once");
+            println!("  harness build {name}");
             Ok(0)
         }
         Err(e) => {
             eprintln!("✗ validation failed: {e:#}");
             eprintln!("\nFix the issues above and re-run:");
-            eprintln!("  harness spec validate {name}");
+            eprintln!("  harness check {name}");
             Ok(1)
         }
     }
@@ -621,22 +918,25 @@ fn validate_spec(root: &Path, name: &str) -> Result<()> {
     // Only enforced when the evals/<spec>/ directory exists (opt-in).
     let evals_dir = root.join("evals").join(name);
     if evals_dir.is_dir() {
+        // Read every eval file (name + contents) once, rather than re-scanning
+        // the directory per requirement.
+        let eval_texts: Vec<String> = std::fs::read_dir(&evals_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let body = std::fs::read_to_string(e.path()).unwrap_or_default();
+                format!("{name}\n{body}")
+            })
+            .collect();
+
         for req in &reqs.requirements {
-            // Look for any eval file that references this requirement id.
-            let has_eval = std::fs::read_dir(&evals_dir)
-                .ok()
-                .map(|entries| {
-                    entries.filter_map(|e| e.ok()).any(|e| {
-                        e.file_name()
-                            .to_string_lossy()
-                            .contains(req.id.as_str())
-                            || std::fs::read_to_string(e.path())
-                                .ok()
-                                .map(|c| c.contains(req.id.as_str()))
-                                .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
+            // A requirement is covered only if its id appears as a whole token —
+            // `R-1` must not be satisfied by an incidental `R-10` or `R-12`.
+            let has_eval = eval_texts
+                .iter()
+                .any(|text| references_id(text, req.id.as_str()));
             if !has_eval {
                 anyhow::bail!(
                     "requirement {} has no eval in evals/{name}/ — \
@@ -648,6 +948,32 @@ fn validate_spec(root: &Path, name: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// True if `id` appears in `haystack` as a whole token, i.e. not immediately
+/// adjacent to another identifier character. Requirement ids contain hyphens
+/// (`R-1`), so a hyphen/alphanumeric/underscore on either side means we matched
+/// a *longer* id (`R-10`) and should not count it as coverage.
+fn references_id(haystack: &str, id: &str) -> bool {
+    if id.is_empty() {
+        return false;
+    }
+    let is_id_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    let bytes = haystack.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(id) {
+        let abs = start + pos;
+        let before_ok = abs == 0
+            || !is_id_char(haystack[..abs].chars().next_back().unwrap());
+        let after_idx = abs + id.len();
+        let after_ok = after_idx >= bytes.len()
+            || !is_id_char(haystack[after_idx..].chars().next().unwrap());
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
 }
 
 fn detect_cycle(tasks: &[spec::Task]) -> Result<()> {
@@ -772,6 +1098,7 @@ fn cmd_sync(root: &Path, name: &str, write: bool, regen_tasks: bool) -> Result<(
                 attempts: 0,
                 max_attempts: 3,
                 notes: None,
+                last_failure: None,
                 phases: vec![],
                 completed_phases: vec![],
                 created_at: now,
@@ -794,12 +1121,12 @@ fn cmd_sync(root: &Path, name: &str, write: bool, regen_tasks: bool) -> Result<(
 
 // ─── hooks ─────────────────────────────────────────────────────────────────
 
-fn cmd_hooks(root: &Path, cmd: HooksCmd) -> Result<i32> {
+fn cmd_gate(root: &Path, cmd: GateCmd) -> Result<i32> {
     match cmd {
-        HooksCmd::List => {
+        GateCmd::Ls | GateCmd::List => {
             let dir = root.join(".harness").join("scripts").join("hooks");
             if !dir.is_dir() {
-                println!("no hooks directory at {}", dir.display());
+                println!("no gates directory at {}", dir.display());
                 return Ok(0);
             }
             for entry in std::fs::read_dir(&dir)? {
@@ -810,7 +1137,8 @@ fn cmd_hooks(root: &Path, cmd: HooksCmd) -> Result<i32> {
             }
             Ok(0)
         }
-        HooksCmd::Run { hook, task } => {
+        GateCmd::Check => cmd_gate_check(root),
+        GateCmd::Run { gate, task } => {
             let (task_json, task_id, spec_name) = match task {
                 Some(tid) => match find_task_json(root, &tid)? {
                     Some((j, s)) => (j, tid, s),
@@ -820,7 +1148,7 @@ fn cmd_hooks(root: &Path, cmd: HooksCmd) -> Result<i32> {
             };
             let config = load_harness_config(root)?;
             let inv = HookInvocation {
-                hook_name: hook.clone(),
+                hook_name: gate.clone(),
                 task_id,
                 spec_name,
                 iteration: 0,
@@ -830,12 +1158,81 @@ fn cmd_hooks(root: &Path, cmd: HooksCmd) -> Result<i32> {
             print!("{}", outcome.stdout);
             eprint!("{}", outcome.stderr);
             println!(
-                "\n[hook '{}' exit {} in {}ms]",
-                hook, outcome.exit_code, outcome.duration_ms
+                "\n[gate '{}' exit {} in {}ms]",
+                gate, outcome.exit_code, outcome.duration_ms
             );
             Ok(outcome.exit_code)
         }
     }
+}
+
+// ─── eval ──────────────────────────────────────────────────────────────────
+
+fn cmd_eval(root: &Path, cmd: EvalCmd) -> Result<i32> {
+    match cmd {
+        EvalCmd::Ls { spec } => {
+            let dir = root.join("evals").join(&spec);
+            if !dir.is_dir() {
+                println!("no evals for '{spec}' (expected {})", dir.display());
+                return Ok(0);
+            }
+            let mut found = false;
+            let mut names: Vec<String> = std::fs::read_dir(&dir)?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
+            names.sort();
+            for n in names {
+                println!("{n}");
+                found = true;
+            }
+            if !found {
+                println!("no eval scripts in {}", dir.display());
+            }
+            Ok(0)
+        }
+        EvalCmd::Run { spec } => cmd_eval_run(root, &spec),
+    }
+}
+
+/// Run a spec's eval scripts against the current code. The oracle is invoked
+/// the same way the rebuild gate runs it (HARNESS_SPEC / HARNESS_ROOT in env).
+fn cmd_eval_run(root: &Path, spec: &str) -> Result<i32> {
+    let dir = root.join("evals").join(spec);
+    if !dir.is_dir() {
+        anyhow::bail!("no evals directory at {}", dir.display());
+    }
+    let mut evals: Vec<PathBuf> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .collect();
+    evals.sort();
+    if evals.is_empty() {
+        println!("no eval scripts in {}", dir.display());
+        return Ok(0);
+    }
+    let mut all_pass = true;
+    for ev in &evals {
+        let rel = ev.strip_prefix(root).unwrap_or(ev);
+        let status = Command::new(ev)
+            .current_dir(root)
+            .env("HARNESS_SPEC", spec)
+            .env("HARNESS_ROOT", root.to_string_lossy().to_string())
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("✓ {}", rel.display()),
+            Ok(s) => {
+                println!("✗ {} (exit {})", rel.display(), s.code().unwrap_or(-1));
+                all_pass = false;
+            }
+            Err(e) => {
+                println!("✗ {} — {e}", rel.display());
+                all_pass = false;
+            }
+        }
+    }
+    Ok(if all_pass { 0 } else { 2 })
 }
 
 fn find_task_json(root: &Path, task_id: &str) -> Result<Option<(String, String)>> {
@@ -846,6 +1243,161 @@ fn find_task_json(root: &Path, task_id: &str) -> Result<Option<(String, String)>
         }
     }
     Ok(None)
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Static preflight for gates: every gate referenced by config/phases/tasks must
+/// exist as an executable script, before a run discovers it the hard way.
+fn cmd_gate_check(root: &Path) -> Result<i32> {
+    use std::collections::BTreeSet;
+
+    let dir = root.join(".harness").join("scripts").join("hooks");
+    let config = load_harness_config(root)?;
+
+    // Collect every gate name anything references, with where it came from.
+    let mut referenced: BTreeSet<String> = BTreeSet::new();
+    for g in &config.hooks.default {
+        referenced.insert(g.clone());
+    }
+    for (_name, pc) in &config.phases {
+        if let Some(hooks) = &pc.hooks {
+            for g in hooks {
+                referenced.insert(g.clone());
+            }
+        }
+    }
+    for s in list_specs(root)? {
+        if let Ok(tasks) = load_tasks(&spec_dir(root, &s)) {
+            for t in &tasks {
+                for g in &t.hooks {
+                    referenced.insert(g.clone());
+                }
+            }
+        }
+    }
+
+    if referenced.is_empty() {
+        println!("no gates referenced by config, phases, or tasks");
+        return Ok(0);
+    }
+
+    let mut ok = true;
+    for gate in &referenced {
+        let path = dir.join(gate);
+        if !path.exists() {
+            println!("✗ {gate} — missing (expected {})", path.display());
+            ok = false;
+        } else if !is_executable(&path) {
+            println!("✗ {gate} — not executable (run: chmod +x {})", path.display());
+            ok = false;
+        } else {
+            println!("✓ {gate}");
+        }
+    }
+
+    // Informational: scripts present on disk that nothing references.
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if entry.path().is_file() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !referenced.contains(&name) {
+                    println!("· {name} (present but unreferenced)");
+                }
+            }
+        }
+    }
+
+    Ok(if ok { 0 } else { 2 })
+}
+
+/// Preview the exact prompt the agent would receive for a task, without running
+/// it. The prompt goes to stdout (pipe-friendly); metadata goes to stderr.
+fn cmd_explain(
+    root: &Path,
+    task_id: &str,
+    spec_filter: Option<&str>,
+    phase_override: Option<&str>,
+) -> Result<i32> {
+    let config = load_harness_config(root)?;
+
+    let specs = match spec_filter {
+        Some(s) => vec![s.to_string()],
+        None => list_specs(root)?,
+    };
+    let mut found: Option<(Task, String)> = None;
+    for s in &specs {
+        let tasks = load_tasks(&spec_dir(root, s))
+            .with_context(|| format!("loading tasks for spec '{s}'"))?;
+        if let Some(t) = tasks.into_iter().find(|t| t.id == task_id) {
+            found = Some((t, s.clone()));
+            break;
+        }
+    }
+    let (task, spec_name) = found.with_context(|| {
+        match spec_filter {
+            Some(s) => format!("task '{task_id}' not found in spec '{s}'"),
+            None => format!("task '{task_id}' not found in any spec"),
+        }
+    })?;
+
+    // Mirror the loop's phase selection: explicit override, else the next phase
+    // that hasn't completed yet.
+    let effective_phases: Vec<String> = if task.phases.is_empty() {
+        config.loop_config.phase_sequence.clone()
+    } else {
+        task.phases.clone()
+    };
+    let current_phase: Option<String> = match phase_override {
+        Some(p) => Some(p.to_string()),
+        None => effective_phases
+            .iter()
+            .find(|p| !task.completed_phases.contains(*p))
+            .cloned(),
+    };
+    let phase_cfg = current_phase.as_deref().and_then(|p| config.phases.get(p));
+    let phase_template = phase_cfg.and_then(|pc| pc.prompt_template.as_deref());
+
+    let state = load_state(root)?;
+    let is_first = state.iteration_count == 0;
+
+    let prompt = compose_prompt(
+        root,
+        &config,
+        &task,
+        &spec_name,
+        is_first,
+        current_phase.as_deref(),
+        phase_template,
+    )?;
+
+    let agent_cmd = phase_cfg
+        .and_then(|pc| pc.agent_command.as_deref())
+        .unwrap_or(&config.agent.command);
+    eprintln!(
+        "# prompt preview · task {} · spec {} · phase {} · {} chars",
+        task.id,
+        spec_name,
+        current_phase.as_deref().unwrap_or("(none)"),
+        prompt.chars().count()
+    );
+    eprintln!("# agent: {}", agent_cmd);
+    if task.attempts > 0 {
+        eprintln!("# note: task has {} prior attempt(s)", task.attempts);
+    }
+    println!("{prompt}");
+    Ok(0)
 }
 
 // ─── status / logs / doctor ──────────────────────────────────────────────────
@@ -895,17 +1447,81 @@ fn cmd_status(root: &Path) -> Result<i32> {
     Ok(0)
 }
 
-fn cmd_logs(root: &Path, iteration: Option<u64>, _follow: bool) -> Result<i32> {
+/// One-line summary of an iteration record, for listing and `--follow` output.
+fn iteration_summary_line(path: &Path) -> Option<String> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let iter = v.get("iteration").and_then(|i| i.as_u64()).unwrap_or(0);
+    let task = v.get("task_id").and_then(|i| i.as_str()).unwrap_or("?");
+    let status = v.get("task_status_after").and_then(|i| i.as_str()).unwrap_or("?");
+    let exit = v.get("agent_exit_status").and_then(|i| i.as_i64()).unwrap_or(0);
+    let gates = v
+        .get("hook_results")
+        .and_then(|h| h.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|h| {
+                    let n = h.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                    let ok = h.get("passed").and_then(|x| x.as_bool()).unwrap_or(false);
+                    format!("{}{}", if ok { "✓" } else { "✗" }, n)
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    Some(format!(
+        "iter {iter:>3} · {task} · {status} · agent exit {exit}{}{}",
+        if gates.is_empty() { "" } else { " · " },
+        gates
+    ))
+}
+
+fn cmd_logs(root: &Path, iteration: Option<u64>, follow: bool) -> Result<i32> {
     let dir = root.join(".harness").join("logs").join("iterations");
     if !dir.is_dir() {
         println!("no iteration logs yet");
-        return Ok(0);
+        // Still allow --follow to wait for the first record to appear.
+        if !follow {
+            return Ok(0);
+        }
     }
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
-        .collect();
-    entries.sort();
+
+    let read_sorted = |dir: &Path| -> Vec<PathBuf> {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+                    .collect()
+            })
+            .unwrap_or_default();
+        entries.sort();
+        entries
+    };
+
+    if follow {
+        use std::collections::HashSet;
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        // Print everything that already exists, then stream new records.
+        for p in read_sorted(&dir) {
+            if let Some(line) = iteration_summary_line(&p) {
+                println!("{line}");
+            }
+            seen.insert(p);
+        }
+        println!("— following {} · Ctrl-C to stop —", dir.display());
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            for p in read_sorted(&dir) {
+                if seen.insert(p.clone()) {
+                    if let Some(line) = iteration_summary_line(&p) {
+                        println!("{line}");
+                    }
+                }
+            }
+        }
+    }
+
+    let entries = read_sorted(&dir);
 
     match iteration {
         Some(n) => {
@@ -922,7 +1538,10 @@ fn cmd_logs(root: &Path, iteration: Option<u64>, _follow: bool) -> Result<i32> {
         }
         None => {
             for p in &entries {
-                println!("{}", p.file_name().unwrap().to_string_lossy());
+                match iteration_summary_line(p) {
+                    Some(line) => println!("{line}"),
+                    None => println!("{}", p.file_name().unwrap().to_string_lossy()),
+                }
             }
         }
     }
@@ -1017,120 +1636,16 @@ fn cmd_doctor(root: &Path) -> Result<i32> {
     }
 
     let specs = list_specs(root).unwrap_or_default();
-    check!("at least one spec", !specs.is_empty(), "run `harness spec draft <name>`");
+    check!("at least one spec", !specs.is_empty(), "run `harness spec new <name>`");
     check!("git repository", root.join(".git").exists(), "run `git init` for rollback safety");
 
-    // Phase 0: every spec must declare `owns`; then check manifest drift.
-    for spec_name in &specs {
-        let dir = spec_dir(root, spec_name);
-        match load_requirements(&dir).ok().map(|r| r.owns.is_empty()) {
-            Some(true) | None => {
-                ok = false;
-                println!(
-                    "✗ spec '{spec_name}' has no 'owns' declaration — \
-                     add an 'owns' glob list to .specs/{spec_name}/1-requirements.json"
-                );
-                continue;
-            }
-            Some(false) => {}
-        }
-        match check_spec(root, spec_name) {
-            Ok(result) if result.is_clean() => {
-                println!("✓ manifest: spec '{spec_name}' — clean");
-            }
-            Ok(result) => {
-                ok = false;
-                for drift in &result.drifts {
-                    match drift {
-                        DriftKind::Unrecorded { .. } => {
-                            println!("✗ manifest: spec '{spec_name}' — never recorded; run `harness manifest record {spec_name}`");
-                        }
-                        DriftKind::StaleCode { .. } => {
-                            println!("✗ manifest: spec '{spec_name}' — spec changed since last regen; run `harness regen {spec_name}`");
-                        }
-                        DriftKind::CodeDrift { path } => {
-                            println!("✗ manifest: spec '{spec_name}' — hand-edit detected: {path}");
-                        }
-                        DriftKind::Missing { path } => {
-                            println!("✗ manifest: spec '{spec_name}' — owned file missing: {path}");
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                ok = false;
-                println!("✗ manifest: spec '{spec_name}' — check failed: {e:#}");
-            }
-        }
+    if !ok {
+        println!("\nFor spec↔code consistency, run `harness check --all`.");
     }
-
     Ok(if ok { 0 } else { 1 })
 }
 
-// ─── manifest ─────────────────────────────────────────────────────────────────
-
-fn cmd_manifest(root: &Path, cmd: ManifestCmd) -> Result<i32> {
-    match cmd {
-        ManifestCmd::Record { spec, all } => {
-            let specs_to_record: Vec<String> = if all {
-                list_specs(root)?
-            } else if let Some(name) = spec {
-                vec![name]
-            } else {
-                anyhow::bail!("provide a spec name or --all");
-            };
-            for name in &specs_to_record {
-                record_spec(root, name)
-                    .with_context(|| format!("recording manifest for '{name}'"))?;
-                println!("✓ recorded manifest for '{name}'");
-            }
-            Ok(0)
-        }
-        ManifestCmd::Check { spec, all } => {
-            let specs_to_check: Vec<String> = if all {
-                list_specs(root)?
-            } else if let Some(name) = spec {
-                vec![name]
-            } else {
-                anyhow::bail!("provide a spec name or --all");
-            };
-            let mut clean = true;
-            for name in &specs_to_check {
-                match check_spec(root, name) {
-                    Ok(result) if result.is_clean() => {
-                        println!("✓ {name}: clean");
-                    }
-                    Ok(result) => {
-                        clean = false;
-                        for drift in &result.drifts {
-                            match drift {
-                                DriftKind::Unrecorded { .. } => {
-                                    println!("✗ {name}: no manifest entry — run `harness manifest record {name}`");
-                                }
-                                DriftKind::StaleCode { .. } => {
-                                    println!("✗ {name}: spec changed, code not regenerated — run `harness regen {name}`");
-                                }
-                                DriftKind::CodeDrift { path } => {
-                                    println!("✗ {name}: hand-edit detected in owned file: {path}");
-                                }
-                                DriftKind::Missing { path } => {
-                                    println!("✗ {name}: owned file missing: {path}");
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        clean = false;
-                        println!("✗ {name}: check error: {e:#}");
-                    }
-                }
-            }
-            Ok(if clean { 0 } else { 1 })
-        }
-    }
-}
-
-// ─── regen ────────────────────────────────────────────────────────────────────
+// ─── rebuild (burn & re-render) ──────────────────────────────────────────────
 
 /// Phase 3 — burn-and-rebuild a spec's owned artifacts from scratch.
 fn cmd_regen(
@@ -1183,6 +1698,10 @@ fn cmd_regen(
         let head_sha = git_head_sha(root).unwrap_or_default();
         println!("[{attempt_label}] HEAD checkpoint: {}", if head_sha.is_empty() { "(no commit)" } else { &head_sha });
 
+        // Snapshot untracked files BEFORE burning/regenerating, so rollback only
+        // removes files this regen created — never the user's untracked work.
+        let untracked_before = crate::util::git_list_untracked(root).unwrap_or_default();
+
         // 2. Delete owned files (they're ashes; the spec is the source).
         println!("[{attempt_label}] Burning {} owned file(s)…", to_burn.len());
         for rel in &to_burn {
@@ -1215,7 +1734,7 @@ fn cmd_regen(
         let agent_exit = status.code().unwrap_or(-1);
         if agent_exit != 0 {
             println!("[{attempt_label}] Agent exited {agent_exit} — rolling back.");
-            let _ = git_reset_workdir_basic(root);
+            let _ = crate::util::git_restore_to_head(root, &untracked_before);
             return Ok((agent_exit, vec![]));
         }
 
@@ -1308,7 +1827,7 @@ fn cmd_regen(
 
         if !all_passed {
             println!("[{attempt_label}] Gates failed — rolling back.");
-            let _ = git_reset_workdir_basic(root);
+            let _ = crate::util::git_restore_to_head(root, &untracked_before);
             return Ok((-1, hook_log));
         }
 
@@ -1329,7 +1848,7 @@ fn cmd_regen(
                     let _ = std::fs::remove_file(&review_file);
                     if rstatus.code().unwrap_or(-1) != 0 {
                         println!("[{attempt_label}] Reviewer rejected regeneration — rolling back.");
-                        let _ = git_reset_workdir_basic(root);
+                        let _ = crate::util::git_restore_to_head(root, &untracked_before);
                         return Ok((-1, hook_log));
                     }
                     println!("[{attempt_label}] Reviewer accepted.");
@@ -1378,27 +1897,6 @@ fn git_head_sha(root: &Path) -> Option<String> {
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-}
-
-fn git_reset_workdir_basic(root: &Path) -> Result<()> {
-    let has_head = Command::new("git")
-        .args(["rev-parse", "--verify", "HEAD"])
-        .current_dir(root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !has_head {
-        return Ok(());
-    }
-    let _ = Command::new("git")
-        .args(["checkout", "HEAD", "--", "."])
-        .current_dir(root)
-        .status();
-    let _ = Command::new("git")
-        .args(["clean", "-fd"])
-        .current_dir(root)
-        .status();
-    Ok(())
 }
 
 fn git_commit_all(root: &Path, message: &str) -> Result<()> {
@@ -1655,9 +2153,9 @@ default_timeout_secs = 600
 "#;
 
 const PRE_COMMIT_HOOK: &str = r#"#!/usr/bin/env sh
-# Installed by `harness init` — gates commits on manifest cleanliness.
-# Fails if any spec-owned file was hand-edited or the spec changed without regen.
-harness manifest check --all
+# Installed by `harness init` — gates commits on spec↔code consistency.
+# Fails if any spec-owned file was hand-edited or the spec changed without rebuild.
+harness check --all
 "#;
 
 const GUARDRAILS_TOML: &str = r#"[budgets]
@@ -1683,9 +2181,12 @@ deny = [
 # [protected]
 # paths = []
 
-# Set to true to enforce task-level write boundaries when tasks declare files_hint.
-# When enabled, any file the agent writes outside files_hint ∪ writes.allow fails the iteration.
-enforce_ownership = false
+# Enforce task-level write boundaries when a task declares files_hint.
+# Any file the agent writes outside files_hint ∪ writes.allow fails the iteration.
+# Only active for tasks that declare files_hint, so it's a no-op for tasks that
+# don't — there is no downside to leaving it on, and it's the tool's core safety
+# net. (Matches the in-code default; set to false only to deliberately disable.)
+enforce_ownership = true
 
 [operations]
 deny_destructive = true
@@ -1767,3 +2268,24 @@ const HOOK_STUB: &str = r#"#!/usr/bin/env sh
 echo "Hook <NAME> not yet implemented" >&2
 exit 0
 "#;
+
+#[cfg(test)]
+mod ref_id_tests {
+    use super::references_id;
+
+    #[test]
+    fn whole_token_matches() {
+        assert!(references_id("covers R-1 here", "R-1"));
+        assert!(references_id("R-1", "R-1"));
+        assert!(references_id("(R-1)", "R-1"));
+        assert!(references_id("see R-1, R-2", "R-1"));
+    }
+
+    #[test]
+    fn longer_id_does_not_falsely_match() {
+        // The classic bug: R-1 must NOT be considered covered by R-10/R-12.
+        assert!(!references_id("only R-10 and R-12 here", "R-1"));
+        assert!(!references_id("R-100", "R-1"));
+        assert!(!references_id("xR-1", "R-1"));
+    }
+}

@@ -97,6 +97,15 @@ pub fn run_hook(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // Run the hook as the leader of its own process group, so a timeout kill
+    // can take down the whole tree (the hook plus any cargo/npm/docker children
+    // it spawned) rather than orphaning grandchildren that keep running.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     let start = Instant::now();
     let mut child = cmd
         .spawn()
@@ -199,9 +208,22 @@ pub fn truncate_output(s: &str, head: usize, tail: usize) -> String {
 
 /// Kill a process by PID. On Unix we send SIGKILL; on Windows we use taskkill.
 /// Best-effort — errors are silently ignored since this is a cleanup path.
+///
+/// On Unix the hook is spawned as its own process-group leader (pgid == pid),
+/// so we signal the whole group (`kill -9 -<pid>`) to reap any children it
+/// spawned. We fall back to the bare pid if the group signal fails (e.g. the
+/// group already exited).
 #[cfg(unix)]
 fn kill_by_pid(pid: u32) {
-    let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+    let group_killed = Command::new("kill")
+        .arg("-9")
+        .arg(format!("-{pid}"))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !group_killed {
+        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+    }
 }
 
 #[cfg(not(unix))]

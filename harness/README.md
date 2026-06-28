@@ -23,10 +23,11 @@ cd your-project
 git init                         # rollback boundary; recommended
 harness init                     # scaffold .harness/
 # edit .harness/scripts/hooks/* to run your real build/test/lint
+harness gate check               # confirm the gate scripts are wired and executable
 # author a spec under .specs/<name>/ (1-requirements.json, 2-design.md, 3-tasks.jsonl)
-harness spec validate <name>
-harness run --dry-run --once     # preview task selection
-harness run                      # drive the loop
+harness check <name>             # spec well-formed + eval coverage + no drift
+harness build --dry-run --once   # preview task selection
+harness build                    # drive the loop
 ```
 
 ## Guided setup (optional Claude Code agent)
@@ -54,19 +55,27 @@ into each project (skipped if one already exists, unless `--force`).
 
 | Command | Purpose |
 |---|---|
-| `harness init [--from-specs] [--force]` | Scaffold `.harness/` (config, prompts, guardrails, hook stubs, logs). |
-| `harness spec list` | List specs under `.specs/`. |
-| `harness spec draft <name>` | Drafting guidance (agent-assisted drafting not yet automated). |
-| `harness spec edit <name> [--requirements\|--design\|--tasks]` | Open a spec file in `$EDITOR`, then validate. |
-| `harness spec validate <name \| --all>` | Check JSON/JSONL, design headings, requirement refs, hook existence, dependency DAG. |
-| `harness spec sync <name>` | Report drift between requirements and tasks (read-only). |
-| `harness run [--spec <n>] [--once] [--max-iterations <N>] [--dry-run]` | Run the Ralph loop. |
-| `harness hooks list` | List hook scripts. |
-| `harness hooks run <hook> [--task <id>]` | Run one hook manually. |
+| `harness init [--force]` | Scaffold `.harness/` (config, prompts, guardrails, gate stubs, logs). |
+| `harness build [<spec> \| --all] [--once] [--max <N>] [--dry-run]` | Render code from a spec, task by task (incremental, non-destructive). The Ralph loop. |
+| `harness rebuild [<spec> \| --all] [--only <glob>] [--force]` | Burn a spec's owned files and re-render from the spec (destructive, eval-gated). |
+| `harness check [<spec> \| --all] [--reverse] [--determinism] [--accept]` | The invariant gate: spec well-formed + eval coverage + no manifest drift. Exits `2` on any problem. |
+| `harness spec ls` | List specs under `.specs/`. |
+| `harness spec new <name> [--brief <text> \| --from <file>]` | Draft a new spec from a brief (agent-assisted). |
+| `harness spec edit <name> [requirements\|design\|tasks]` | Open a spec file in `$EDITOR`, then check it. |
+| `harness spec show <name>` | Print a spec's resolved contents. |
+| `harness spec tasks <name> [--fix]` | Report requirement↔task coverage; `--fix` writes task stubs. |
+| `harness eval ls <spec>` / `harness eval run <spec>` | List or run a spec's evals (the acceptance oracle). |
+| `harness gate ls` | List gate scripts. |
+| `harness gate check` | Verify every referenced gate exists and is executable (static preflight). Exits `2` if any is broken. |
+| `harness gate run <gate> [--task <id>]` | Run one gate manually. |
+| `harness explain <task> [--spec <name>] [--phase <name>]` | Preview the exact prompt the agent would receive for a task, without running it. |
 | `harness status` | Active spec/task and task counts. |
 | `harness watch` | Live terminal dashboard (TUI) that visualizes a run as it happens. |
-| `harness logs [--iteration <n>]` | List iteration records or show one. |
-| `harness doctor` | Validate config, hooks, agent adapter, git. |
+| `harness log [<n>] [--follow]` | List iteration records, show one by number, or `--follow` to stream them live. |
+| `harness doctor` | Validate config, gates, agent adapter, git. |
+
+> Earlier verbs (`run`, `regen`, `hooks`, `logs`, `spec list/draft/validate/sync`,
+> `manifest`) still work as hidden, deprecated aliases that print a migration note.
 
 ## Exit codes (top-level)
 
@@ -84,17 +93,23 @@ Each iteration:
 1. Select the lowest-`priority` `todo` task whose `depends_on` are all `done`
    (across all in-scope specs).
 2. Compose a prompt from the template + guardrails + the task + matching
-   requirements + design excerpt + `progress.md`.
+   requirements + design excerpt + `progress.md`. If the task failed a previous
+   attempt, the captured failure (failing gate output or agent error) is injected
+   as a **"Previous attempt failed — fix this first"** section so the agent can
+   diagnose and self-correct rather than blindly repeat the same approach.
 3. Run the agent as a **fresh process** (`[agent].command`, with `{prompt_file}`
    substituted).
-4. Run the task's blocking **hooks** in order. First blocking failure
+4. Run the task's blocking **gates** in order. First blocking failure
    short-circuits the iteration.
-5. All blocking hooks pass → mark `done`, optionally `git commit`. Otherwise
-   increment `attempts`; park as `blocked` once `max_attempts` is reached.
+5. All blocking gates pass → mark `done`, clear the stored failure, optionally
+   `git commit`. Otherwise capture the failure into the task's `last_failure`,
+   increment `attempts`, and park as `blocked` once `max_attempts` is reached.
 6. Write a structured iteration record and update `state.json` / `progress.md`.
 
 State lives entirely on disk (`.harness/`, `.specs/`), so a run is safe to
-Ctrl-C and resume.
+Ctrl-C and resume — just re-run `harness build` and it picks up the remaining
+tasks. To preview what the agent will see for a given task before (or after) a
+run, use `harness explain <task>`.
 
 ## Watching a run live
 
@@ -107,11 +122,15 @@ happened.
 
 ```sh
 # terminal 1
-harness run
+harness build
 
 # terminal 2
 harness watch
 ```
+
+For a lighter-weight, log-only view (no TUI), `harness log --follow` streams a
+one-line summary of each iteration as it completes — handy over SSH or when piping
+to a file.
 
 It shows:
 
@@ -265,10 +284,11 @@ Tasks that omit `hooks` fall back to `[hooks].default` from `harness.toml`.
 ### 5. Verify and run
 
 ```sh
-harness doctor                   # confirms claude is callable, hooks exist, git is present
-harness hooks run run_build      # smoke-test a single hook by hand
-harness spec validate api
-harness run                      # drive the loop; each task is built/linted/tested before it counts as done
+harness doctor                   # confirms claude is callable, gates exist, git is present
+harness gate check               # confirm every referenced gate is present and executable
+harness gate run run_build       # smoke-test a single gate by hand
+harness check api                # spec well-formed + eval coverage + no drift
+harness build                    # drive the loop; each task is built/linted/tested before it counts as done
 ```
 
 If `tsc` or Vitest fails, the iteration fails: `harness` increments the task's
@@ -279,7 +299,8 @@ done on the agent's say-so.
 
 ## Status
 
-v0.1. Implemented: the full loop, hooks, spec validation/sync (read-only),
-logging, and all CLI commands above. Not yet implemented: agent-assisted
-`spec draft`, `spec sync --write/--regen-tasks/--against-code`, write-allowlist
-enforcement/sandboxing, and cross-model review.
+v0.1. Implemented: the full loop with prior-failure feedback into retries,
+gates (with `gate check` preflight), spec authoring/coverage, the invariant
+`check`, destructive `rebuild`, prompt preview (`explain`), live `watch` and
+`log --follow`, and all CLI commands above. Not yet implemented: write-allowlist
+sandboxing and cross-model review.

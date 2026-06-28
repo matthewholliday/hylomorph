@@ -46,7 +46,11 @@ impl Default for AgentConfig {
 pub struct LoopConfig {
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
-    #[serde(default)]
+    /// Commit after each successful task. Default: true. This is load-bearing,
+    /// not just convenience: the protected-write and ownership guards diff the
+    /// working tree against HEAD, so HEAD must advance every successful iteration
+    /// for those checks to distinguish *this* iteration's writes from prior ones.
+    #[serde(default = "default_commit_each_success")]
     pub commit_each_success: bool,
     #[serde(default = "default_commit_message_template")]
     pub commit_message_template: String,
@@ -71,6 +75,10 @@ fn default_reset_on_failure() -> bool {
     true
 }
 
+fn default_commit_each_success() -> bool {
+    true
+}
+
 fn default_max_iterations() -> u32 {
     100
 }
@@ -87,7 +95,7 @@ impl Default for LoopConfig {
     fn default() -> Self {
         Self {
             max_iterations: default_max_iterations(),
-            commit_each_success: false,
+            commit_each_success: default_commit_each_success(),
             commit_message_template: default_commit_message_template(),
             stop_when_no_tasks: default_stop_when_no_tasks(),
             reset_on_failure: default_reset_on_failure(),

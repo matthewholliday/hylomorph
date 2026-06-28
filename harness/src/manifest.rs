@@ -51,7 +51,7 @@ pub fn save_manifest(root: &Path, manifest: &Manifest) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let data = serde_json::to_string_pretty(manifest).context("serializing manifest")?;
-    std::fs::write(&path, &data)
+    crate::util::atomic_write_str(&path, &data)
         .with_context(|| format!("writing manifest {}", path.display()))?;
     Ok(())
 }

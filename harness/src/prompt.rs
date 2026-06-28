@@ -118,6 +118,14 @@ pub fn compose_prompt(
     let task_files_hint = task.files_hint.join(", ");
     let phase_name_str = phase_name.unwrap_or("");
 
+    // Surface the prior attempt's failure (gate output or agent error), if any,
+    // so the agent can self-correct rather than repeat the same mistake. Capped
+    // so a noisy gate log can't dominate the prompt.
+    let last_failure = match &task.last_failure {
+        Some(f) if !f.trim().is_empty() => truncate_at_newlines(f, 3000, 2400, 400),
+        _ => String::new(),
+    };
+
     let vars: &[(&str, &str)] = &[
         ("task_id", &task.id),
         ("task_title", &task.title),
@@ -129,6 +137,7 @@ pub fn compose_prompt(
         ("requirements", &requirements_json),
         ("design_excerpt", &design_excerpt),
         ("phase_name", phase_name_str),
+        ("last_failure", &last_failure),
     ];
 
     let mut body = substitute(&template, vars);
@@ -138,8 +147,15 @@ pub fn compose_prompt(
     } else {
         String::new()
     };
+    let retry_section = if last_failure.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n## Previous attempt failed — fix this first\nThis task was already attempted and failed. Read the failure below, diagnose the root cause, and address it in this attempt. Do not simply retry the same approach.\n\n{last_failure}"
+        )
+    };
     let footer = format!(
-        "\n\n## Your task\nID: {}{}\nTitle: {}\nAcceptance:\n{}\n\nDo ONLY this task. Leave the project buildable. Update .harness/logs/progress.md with what you did. Then stop.\n\n**Do not modify any file under `.specs/` or `.harness/` (other than `.harness/logs/progress.md`). The harness will fail this iteration if you do.**",
+        "{retry_section}\n\n## Your task\nID: {}{}\nTitle: {}\nAcceptance:\n{}\n\nDo ONLY this task. Leave the project buildable. Update .harness/logs/progress.md with what you did. Then stop.\n\n**Do not modify any file under `.specs/` or `.harness/` (other than `.harness/logs/progress.md`). The harness will fail this iteration if you do.**",
         task.id,
         phase_header,
         task.title,

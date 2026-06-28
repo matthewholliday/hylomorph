@@ -73,7 +73,7 @@ pub fn save_state(root: &Path, state: &LoopState) -> Result<()> {
             .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
     }
     let data = serde_json::to_string_pretty(state).context("Failed to serialize state")?;
-    fs::write(&path, data)
+    crate::util::atomic_write_str(&path, &data)
         .with_context(|| format!("Failed to write state file: {}", path.display()))?;
     Ok(())
 }

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +37,11 @@ pub struct Task {
     pub max_attempts: u32,
     #[serde(default)]
     pub notes: Option<String>,
+    /// Managed by the harness. Captures the failing gate output (or agent error)
+    /// from the most recent failed attempt, so the retry prompt can show the
+    /// agent exactly what went wrong. Cleared when the task succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<String>,
     /// Optional task-specific phase sequence. When non-empty, overrides
     /// `[loop].phase_sequence` from harness.toml for this task only.
     #[serde(default)]
@@ -155,14 +160,17 @@ pub fn load_tasks(spec_dir: &Path) -> Result<Vec<Task>> {
 
 pub fn save_tasks(spec_dir: &Path, tasks: &[Task]) -> Result<()> {
     let path = spec_dir.join("3-tasks.jsonl");
-    let mut file = std::fs::File::create(&path)
-        .with_context(|| format!("creating tasks file {:?}", path))?;
+    let mut buf = String::new();
     for task in tasks {
         let line = serde_json::to_string(task)
             .with_context(|| format!("serializing task {}", task.id))?;
-        writeln!(file, "{}", line)?;
+        buf.push_str(&line);
+        buf.push('\n');
     }
-    Ok(())
+    // Atomic write: this file is rewritten after every iteration, so a
+    // truncate-then-write would leave a constant window where Ctrl-C corrupts
+    // the entire task list.
+    crate::util::atomic_write_str(&path, &buf)
 }
 
 pub fn load_requirements(spec_dir: &Path) -> Result<RequirementsFile> {

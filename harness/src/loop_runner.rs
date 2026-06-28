@@ -254,6 +254,12 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
             .working_dir
             .clone()
             .unwrap_or_else(|| ".".to_string());
+
+        // Snapshot untracked files BEFORE the agent runs. On a failed iteration
+        // we only delete files that did not exist before this attempt, so the
+        // reset never destroys the user's pre-existing untracked work.
+        let untracked_before = list_untracked(root).unwrap_or_default();
+
         let agent_status = run_agent(root, &working_dir, &cmd_str);
 
         let agent_exit = match &agent_status {
@@ -394,6 +400,7 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
                     let task_mut = &mut tasks_by_spec[spec_vec_idx].1[entry.idx];
                     task_mut.status = TaskStatus::Todo;
                     task_mut.attempts = 0;
+                    task_mut.last_failure = None;
                     task_mut.updated_at = Utc::now();
                 }
                 final_status = TaskStatus::Todo;
@@ -430,7 +437,7 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
             // Failed attempt. Restore the working tree to the last clean commit
             // first, so this broken attempt can't poison the next task.
             if config.loop_config.reset_on_failure {
-                match git_reset_workdir(root) {
+                match git_reset_workdir(root, &untracked_before) {
                     Ok(()) => append_progress(
                         root,
                         &format!("- [{}] iter {iter}: reset working tree to HEAD", now()),
@@ -458,6 +465,32 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
                 Some(existing) if !existing.is_empty() => format!("{existing}\n{note}"),
                 _ => note.clone(),
             });
+            // Capture rich failure detail so the retry prompt can show the agent
+            // exactly what broke. Prefer failing gate output; fall back to the
+            // one-line summary when the failure was a boundary/protected write.
+            let detail = if agent_exit != 0 {
+                format!("The previous attempt's agent process exited {agent_exit}{phase_label}.")
+            } else {
+                let gate_detail = hook_results
+                    .iter()
+                    .filter(|h| h.blocking && !h.passed)
+                    .map(|h| {
+                        format!(
+                            "### gate `{}` failed (exit {})\n{}",
+                            h.name,
+                            h.exit_code,
+                            h.truncated_output.trim()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if gate_detail.is_empty() {
+                    format!("The previous attempt was rejected: {summary}.")
+                } else {
+                    format!("The previous attempt failed its gates{phase_label}:\n\n{gate_detail}")
+                }
+            };
+            task_mut.last_failure = Some(detail);
             if task_mut.attempts >= task_mut.max_attempts {
                 task_mut.status = TaskStatus::Blocked;
                 final_status = TaskStatus::Blocked;
@@ -482,6 +515,7 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
         if final_status == TaskStatus::Done {
             let task_mut = &mut tasks_by_spec[spec_vec_idx].1[entry.idx];
             task_mut.status = TaskStatus::Done;
+            task_mut.last_failure = None;
             task_mut.updated_at = Utc::now();
         }
 
@@ -607,49 +641,7 @@ fn git_commit(root: &Path, message: &str) -> Result<Option<String>> {
     Ok(Some(sha))
 }
 
-/// Restore the working tree to the last committed state after a failed
-/// iteration, so a broken attempt can't poison subsequent tasks. The harness's
-/// own bookkeeping under `.harness/logs` is preserved (both its tracked and
-/// untracked files), keeping per-iteration observability intact. No-op with a
-/// warning if the repo has no commit to roll back to.
-fn git_reset_workdir(root: &Path) -> Result<()> {
-    let has_head = Command::new("git")
-        .args(["rev-parse", "--verify", "HEAD"])
-        .current_dir(root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !has_head {
-        anyhow::bail!("no commit to reset to (empty repository)");
-    }
-
-    // Restore tracked files to HEAD, except harness logs.
-    let checkout = Command::new("git")
-        .args(["checkout", "HEAD", "--", ".", ":(exclude).harness/logs"])
-        .current_dir(root)
-        .output()
-        .context("git checkout (reset) failed to run")?;
-    if !checkout.status.success() {
-        anyhow::bail!(
-            "git checkout failed: {}",
-            String::from_utf8_lossy(&checkout.stderr).trim()
-        );
-    }
-
-    // Remove untracked files the agent created, except harness logs.
-    let clean = Command::new("git")
-        .args(["clean", "-fd", "-e", ".harness/logs"])
-        .current_dir(root)
-        .output()
-        .context("git clean (reset) failed to run")?;
-    if !clean.status.success() {
-        anyhow::bail!(
-            "git clean failed: {}",
-            String::from_utf8_lossy(&clean.stderr).trim()
-        );
-    }
-    Ok(())
-}
+use crate::util::{git_list_untracked as list_untracked, git_restore_to_head as git_reset_workdir};
 
 fn print_summary(done: usize, blocked: usize, remaining: usize, elapsed_secs: u64) {
     println!("\n=== harness summary ===");
