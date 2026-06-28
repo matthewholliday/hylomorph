@@ -117,7 +117,7 @@ run, use `harness explain <task>`.
 run state a few times a second and paints it. Because the loop already persists
 everything as it goes (`state.json`, `iterations/*.json`, `progress.md`, and the
 per-spec `3-tasks.jsonl`), the dashboard never touches the loop — run it in a
-second terminal next to `harness run`, or open it after a run to replay what
+second terminal next to `harness build`, or open it after a run to replay what
 happened.
 
 ```sh

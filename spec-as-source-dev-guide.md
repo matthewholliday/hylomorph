@@ -117,7 +117,7 @@ When the agent finishes, two things happen before the harness moves on.
 
 First, **protected write enforcement**: the harness checks the git diff and verifies the agent didn't touch anything outside `src/`. The spec files under `.specs/`, the eval scripts under `evals/`, and the harness config under `.harness/` are all protected. If the agent had tried to modify `1-requirements.json` — perhaps trying to "fix" an ambiguous requirement by changing the spec rather than asking for clarification — the iteration would fail and the working tree would reset. The spec is the source of truth; the agent is not allowed to rewrite it.
 
-Second, **hook validation**: the harness runs the configured hooks — `run_build`, `run_lint`, `run_unit_tests`. If any fail, the iteration is marked as failed, the working tree resets, and the task goes back to Todo for another attempt.
+Second, **gate validation**: the harness runs the configured gates — `run_build`, `run_lint`, `run_unit_tests`. If any fail, the iteration is marked as failed, the working tree resets, and the task goes back to Todo for another attempt. The failing gate's output is captured on the task, and on the next attempt it's fed back into the prompt as a "Previous attempt failed — fix this first" section — so the agent debugs the actual error instead of blindly re-running the same approach. (Want to see exactly what the agent will receive? `harness explain T-001`.)
 
 Both checks pass. The harness marks `T-001` done, and before it moves to the next task it does one more thing: **it records the manifest**.
 
@@ -360,6 +360,9 @@ That's it. Everything else — pace layers, determinism probes, round-trip sync 
 | `harness check <name> --determinism` | Determinism probe (rebuild twice) |
 | `harness check <name> --reverse` | Reconstruct spec from code, emit convergence verdict |
 | `harness eval run <name>` | Run the oracle against current code |
+| `harness gate check` | Verify every referenced gate exists and is executable |
+| `harness explain <task>` | Preview the exact prompt the agent would receive (no run) |
+| `harness log --follow` | Stream a one-line summary of each iteration as it completes |
 | `harness doctor` | Environment/config health check |
 
 **Key fields in `1-requirements.json`:**
