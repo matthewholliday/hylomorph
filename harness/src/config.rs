@@ -263,6 +263,15 @@ impl Default for HookGuardrail {
     }
 }
 
+/// Paths that are always off-limits for agent writes, regardless of other config.
+/// `.specs/**`, `evals/**`, `.harness/guardrails/**`, `.harness/manifest.json`,
+/// and `.git/**` are always protected; this block adds project-specific extras.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ProtectedConfig {
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct GuardrailsConfig {
     #[serde(default)]
@@ -271,9 +280,16 @@ pub struct GuardrailsConfig {
     pub writes: WritesConfig,
     #[serde(default)]
     pub operations: OperationsConfig,
+    /// Paths always off-limits for agent writes (in addition to the built-in set).
+    #[serde(default)]
+    pub protected: ProtectedConfig,
     /// Per-hook overrides keyed by hook name, from [hooks.<name>] table.
     #[serde(default)]
     pub hooks: HashMap<String, HookGuardrail>,
+    /// When true and a task has non-empty files_hint, any file the agent changes
+    /// that falls outside files_hint ∪ writes.allow causes the iteration to fail.
+    #[serde(default)]
+    pub enforce_ownership: bool,
 }
 
 // ── Loaders ───────────────────────────────────────────────────────────────────

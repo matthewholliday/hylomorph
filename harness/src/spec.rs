@@ -95,6 +95,19 @@ pub struct RequirementsFile {
     #[serde(default)]
     pub glossary: HashMap<String, String>,
     pub requirements: Vec<Requirement>,
+    /// Glob patterns (relative to project root) for files this spec owns.
+    /// These are the only files the agent may write during a normal run
+    /// and the only files that are deleted/rebuilt during `harness regen`.
+    #[serde(default)]
+    pub owns: Vec<String>,
+    /// Stability tier: "weekly" | "monthly" | "yearly" | "never".
+    /// `harness regen` refuses to burn a "never" layer without --force-boundary.
+    #[serde(default)]
+    pub pace_layer: Option<String>,
+    /// When true, regeneration requires an independent cross-model review pass
+    /// before the result is accepted (Phase 5).
+    #[serde(default)]
+    pub public_interface: bool,
 }
 
 pub fn spec_dir(root: &Path, spec_name: &str) -> PathBuf {

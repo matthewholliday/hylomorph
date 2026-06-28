@@ -1,6 +1,7 @@
 mod config;
 mod hooks;
 mod loop_runner;
+mod manifest;
 mod prompt;
 mod spec;
 mod state;
@@ -16,6 +17,7 @@ use clap::{Parser, Subcommand};
 use crate::config::{find_project_root, load_harness_config};
 use crate::hooks::{run_hook, HookInvocation};
 use crate::loop_runner::{run, RunOptions};
+use crate::manifest::{check_spec, record_spec, DriftKind};
 use crate::spec::{list_specs, load_requirements, load_tasks, save_tasks, spec_dir, Task, TaskStatus};
 use crate::state::load_state;
 
@@ -69,6 +71,25 @@ enum Commands {
     },
     /// Validate config, hooks, agent adapter, git.
     Doctor,
+    /// Manage the spec ownership manifest (Phase 0).
+    Manifest {
+        #[command(subcommand)]
+        cmd: ManifestCmd,
+    },
+    /// Regenerate owned artifacts from a spec (Phase 3 — burn & rebuild).
+    Regen {
+        /// Spec to regenerate.
+        spec: String,
+        /// Only burn/rebuild files matching this glob (subset of spec ownership).
+        #[arg(long)]
+        component: Option<String>,
+        /// Regenerate twice and compare eval results for a determinism probe.
+        #[arg(long)]
+        twice: bool,
+        /// Bypass the pace_layer="never" guard.
+        #[arg(long)]
+        force_boundary: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -107,6 +128,22 @@ enum SpecCmd {
         against_code: bool,
         #[arg(long)]
         write: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ManifestCmd {
+    /// Recompute and store the manifest for a spec (or all specs with --all).
+    Record {
+        spec: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Check for ownership drift; exits non-zero if any drift is found.
+    Check {
+        spec: Option<String>,
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -180,6 +217,14 @@ fn dispatch(cli: Cli) -> Result<i32> {
             let root = find_project_root()?;
             cmd_doctor(&root)
         }
+        Commands::Manifest { cmd } => {
+            let root = find_project_root()?;
+            cmd_manifest(&root, cmd)
+        }
+        Commands::Regen { spec, component, twice, force_boundary } => {
+            let root = find_project_root()?;
+            cmd_regen(&root, &spec, component.as_deref(), twice, force_boundary)
+        }
     }
 }
 
@@ -228,6 +273,27 @@ fn cmd_init(root: &Path, _from_specs: bool, force: bool) -> Result<()> {
     std::fs::create_dir_all(harness.join("scripts").join("lib"))?;
     std::fs::create_dir_all(harness.join("logs").join("iterations"))?;
     std::fs::create_dir_all(harness.join("logs").join("hooks"))?;
+    std::fs::create_dir_all(harness.join("roundtrip"))?;
+
+    // Phase 0: install a git pre-commit hook that runs `harness manifest check --all`.
+    let git_hooks_dir = root.join(".git").join("hooks");
+    if git_hooks_dir.is_dir() {
+        let pre_commit = git_hooks_dir.join("pre-commit");
+        if pre_commit.exists() && !force {
+            println!("  skip   {} (exists)", pre_commit.display());
+        } else {
+            std::fs::write(&pre_commit, PRE_COMMIT_HOOK)?;
+            make_executable(&pre_commit)?;
+            println!("  create {} (manifest drift gate)", pre_commit.display());
+        }
+    }
+
+    // Phase 2: create the top-level evals/ directory.
+    let evals_dir = root.join("evals");
+    if !evals_dir.exists() {
+        std::fs::create_dir_all(&evals_dir)?;
+        println!("  create evals/  (spec-independent oracle root)");
+    }
 
     // Optional Claude Code setup agent the user can run to configure hooks.
     let agent_path = root.join(".claude").join("agents").join("harness-setup.md");
@@ -278,8 +344,8 @@ fn cmd_spec(root: &Path, cmd: SpecCmd) -> Result<i32> {
             }
             Ok(0)
         }
-        SpecCmd::Draft { name, brief, from, .. } => {
-            cmd_spec_draft(root, &name, brief, from)
+        SpecCmd::Draft { name, brief, from, interactive } => {
+            cmd_spec_draft(root, &name, brief, from, interactive)
         }
         SpecCmd::Edit {
             name,
@@ -337,8 +403,12 @@ fn cmd_spec(root: &Path, cmd: SpecCmd) -> Result<i32> {
                 Ok(1)
             }
         }
-        SpecCmd::Sync { name, write, regen_tasks, .. } => {
-            cmd_sync(root, &name, write, regen_tasks)?;
+        SpecCmd::Sync { name, write, regen_tasks, against_code } => {
+            if against_code {
+                cmd_sync_against_code(root, &name)?;
+            } else {
+                cmd_sync(root, &name, write, regen_tasks)?;
+            }
             Ok(0)
         }
     }
@@ -349,6 +419,7 @@ fn cmd_spec_draft(
     name: &str,
     brief: Option<String>,
     from: Option<PathBuf>,
+    interactive: bool,
 ) -> Result<i32> {
     use std::io::Read as _;
 
@@ -371,19 +442,25 @@ fn cmd_spec_draft(
         }
         (None, Some(path)) => std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read brief from {}", path.display()))?,
-        (None, None) => {
-            // Fall back to interactive: read from stdin with a prompt.
+        (None, None) if interactive => {
+            // Explicit opt-in: read from stdin with a prompt. Only the
+            // `--interactive` flag enables this blocking read so the command
+            // never hangs waiting on an EOF that may never come.
             eprintln!("Brief (describe what this spec should do; end with Ctrl-D):");
             let mut s = String::new();
             std::io::stdin()
                 .read_to_string(&mut s)
                 .context("failed to read brief from stdin")?;
             if s.trim().is_empty() {
-                anyhow::bail!(
-                    "no brief supplied — use --brief \"...\" or --from <file> or pipe to stdin"
-                );
+                anyhow::bail!("no brief supplied on stdin");
             }
             s
+        }
+        (None, None) => {
+            anyhow::bail!(
+                "no brief supplied — pass --brief \"...\", --from <file>, \
+                 --from - to read stdin, or --interactive to type one"
+            );
         }
     };
 
@@ -539,6 +616,37 @@ fn validate_spec(root: &Path, name: &str) -> Result<()> {
         }
     }
     detect_cycle(&tasks)?;
+
+    // Phase 2: require that every requirement maps to at least one eval script.
+    // Only enforced when the evals/<spec>/ directory exists (opt-in).
+    let evals_dir = root.join("evals").join(name);
+    if evals_dir.is_dir() {
+        for req in &reqs.requirements {
+            // Look for any eval file that references this requirement id.
+            let has_eval = std::fs::read_dir(&evals_dir)
+                .ok()
+                .map(|entries| {
+                    entries.filter_map(|e| e.ok()).any(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .contains(req.id.as_str())
+                            || std::fs::read_to_string(e.path())
+                                .ok()
+                                .map(|c| c.contains(req.id.as_str()))
+                                .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if !has_eval {
+                anyhow::bail!(
+                    "requirement {} has no eval in evals/{name}/ — \
+                     add an eval script or stub referencing '{}'",
+                    req.id, req.id
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -910,10 +1018,580 @@ fn cmd_doctor(root: &Path) -> Result<i32> {
 
     let specs = list_specs(root).unwrap_or_default();
     check!("at least one spec", !specs.is_empty(), "run `harness spec draft <name>`");
-
     check!("git repository", root.join(".git").exists(), "run `git init` for rollback safety");
 
+    // Phase 0: manifest drift check for every spec that has an `owns` list.
+    for spec_name in &specs {
+        let dir = spec_dir(root, spec_name);
+        let has_owns = load_requirements(&dir)
+            .ok()
+            .map(|r| !r.owns.is_empty())
+            .unwrap_or(false);
+        if has_owns {
+            match check_spec(root, spec_name) {
+                Ok(result) if result.is_clean() => {
+                    println!("✓ manifest: spec '{spec_name}' — clean");
+                }
+                Ok(result) => {
+                    ok = false;
+                    for drift in &result.drifts {
+                        match drift {
+                            DriftKind::Unrecorded { .. } => {
+                                println!("✗ manifest: spec '{spec_name}' — never recorded; run `harness manifest record {spec_name}`");
+                            }
+                            DriftKind::StaleCode { .. } => {
+                                println!("✗ manifest: spec '{spec_name}' — spec changed since last regen; run `harness regen {spec_name}`");
+                            }
+                            DriftKind::CodeDrift { path } => {
+                                println!("✗ manifest: spec '{spec_name}' — hand-edit detected: {path}");
+                            }
+                            DriftKind::Missing { path } => {
+                                println!("✗ manifest: spec '{spec_name}' — owned file missing: {path}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    ok = false;
+                    println!("✗ manifest: spec '{spec_name}' — check failed: {e:#}");
+                }
+            }
+        }
+    }
+
     Ok(if ok { 0 } else { 1 })
+}
+
+// ─── manifest ─────────────────────────────────────────────────────────────────
+
+fn cmd_manifest(root: &Path, cmd: ManifestCmd) -> Result<i32> {
+    match cmd {
+        ManifestCmd::Record { spec, all } => {
+            let specs_to_record: Vec<String> = if all {
+                list_specs(root)?
+            } else if let Some(name) = spec {
+                vec![name]
+            } else {
+                anyhow::bail!("provide a spec name or --all");
+            };
+            for name in &specs_to_record {
+                record_spec(root, name)
+                    .with_context(|| format!("recording manifest for '{name}'"))?;
+                println!("✓ recorded manifest for '{name}'");
+            }
+            Ok(0)
+        }
+        ManifestCmd::Check { spec, all } => {
+            let specs_to_check: Vec<String> = if all {
+                list_specs(root)?
+            } else if let Some(name) = spec {
+                vec![name]
+            } else {
+                anyhow::bail!("provide a spec name or --all");
+            };
+            let mut clean = true;
+            for name in &specs_to_check {
+                match check_spec(root, name) {
+                    Ok(result) if result.is_clean() => {
+                        println!("✓ {name}: clean");
+                    }
+                    Ok(result) => {
+                        clean = false;
+                        for drift in &result.drifts {
+                            match drift {
+                                DriftKind::Unrecorded { .. } => {
+                                    println!("✗ {name}: no manifest entry — run `harness manifest record {name}`");
+                                }
+                                DriftKind::StaleCode { .. } => {
+                                    println!("✗ {name}: spec changed, code not regenerated — run `harness regen {name}`");
+                                }
+                                DriftKind::CodeDrift { path } => {
+                                    println!("✗ {name}: hand-edit detected in owned file: {path}");
+                                }
+                                DriftKind::Missing { path } => {
+                                    println!("✗ {name}: owned file missing: {path}");
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        clean = false;
+                        println!("✗ {name}: check error: {e:#}");
+                    }
+                }
+            }
+            Ok(if clean { 0 } else { 1 })
+        }
+    }
+}
+
+// ─── regen ────────────────────────────────────────────────────────────────────
+
+/// Phase 3 — burn-and-rebuild a spec's owned artifacts from scratch.
+fn cmd_regen(
+    root: &Path,
+    spec_name: &str,
+    component: Option<&str>,
+    twice: bool,
+    force_boundary: bool,
+) -> Result<i32> {
+    let dir = spec_dir(root, spec_name);
+    if !dir.exists() {
+        anyhow::bail!("spec '{spec_name}' not found");
+    }
+
+    let reqs = load_requirements(&dir)?;
+
+    // Respect pace_layer: "never" means hands-off unless forced.
+    if let Some(ref layer) = reqs.pace_layer {
+        if layer == "never" && !force_boundary {
+            anyhow::bail!(
+                "spec '{spec_name}' has pace_layer=\"never\" — pass --force-boundary to override"
+            );
+        }
+    }
+
+    let owns = &reqs.owns;
+    if owns.is_empty() {
+        anyhow::bail!(
+            "spec '{spec_name}' has no 'owns' declaration — \
+             add an 'owns' glob list to 1-requirements.json before regenerating"
+        );
+    }
+
+    // Build the set of files to burn.
+    let all_owned = crate::manifest::expand_owned_paths(root, owns)?;
+    let to_burn: Vec<String> = if let Some(comp_glob) = component {
+        let comp_set = crate::manifest::build_owns_globset(&[comp_glob.to_string()])?;
+        all_owned.into_iter().filter(|p| comp_set.is_match(p)).collect()
+    } else {
+        all_owned
+    };
+
+    if to_burn.is_empty() {
+        println!("No owned files matched — nothing to regenerate.");
+        return Ok(0);
+    }
+
+    let run_regen = |attempt_label: &str| -> Result<(i32, Vec<String>)> {
+        // 1. Git checkpoint: record HEAD so we can roll back on failure.
+        let head_sha = git_head_sha(root).unwrap_or_default();
+        println!("[{attempt_label}] HEAD checkpoint: {}", if head_sha.is_empty() { "(no commit)" } else { &head_sha });
+
+        // 2. Delete owned files (they're ashes; the spec is the source).
+        println!("[{attempt_label}] Burning {} owned file(s)…", to_burn.len());
+        for rel in &to_burn {
+            let abs = root.join(rel);
+            if abs.exists() {
+                std::fs::remove_file(&abs)
+                    .with_context(|| format!("deleting owned file {rel}"))?;
+                println!("  del {rel}");
+            }
+        }
+
+        // 3. Compose a regeneration prompt and run the agent.
+        let config = load_harness_config(root)?;
+        let regen_prompt = compose_regen_prompt(root, spec_name, &reqs, &to_burn)?;
+        let (prompt_file, _) = crate::prompt::write_prompt_file(&regen_prompt)?;
+
+        let cmd_str = config.agent.command.replace("{prompt_file}", &prompt_file.to_string_lossy());
+        let working_dir = config.agent.working_dir.as_deref().unwrap_or(".");
+        let wd = root.join(working_dir);
+
+        println!("[{attempt_label}] Running agent for regeneration…");
+        let status = if cfg!(windows) {
+            Command::new("cmd").arg("/C").arg(&cmd_str).current_dir(&wd).status()
+        } else {
+            Command::new("sh").arg("-c").arg(&cmd_str).current_dir(&wd).status()
+        }
+        .with_context(|| format!("failed to launch agent: {cmd_str}"))?;
+        let _ = std::fs::remove_file(&prompt_file);
+
+        let agent_exit = status.code().unwrap_or(-1);
+        if agent_exit != 0 {
+            println!("[{attempt_label}] Agent exited {agent_exit} — rolling back.");
+            let _ = git_reset_workdir_basic(root);
+            return Ok((agent_exit, vec![]));
+        }
+
+        // 4. Run hooks (including evals from evals/<spec>/).
+        let guardrails = crate::config::load_guardrails(root)?;
+        let hooks_to_run = if config.hooks.default.is_empty() { vec![] } else { config.hooks.default.clone() };
+
+        // Also collect eval scripts for this spec.
+        let eval_dir = root.join("evals").join(spec_name);
+        let mut eval_hooks: Vec<String> = Vec::new();
+        if eval_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&eval_dir) {
+                for e in entries.filter_map(|e| e.ok()) {
+                    if e.path().is_file() {
+                        if let Some(name) = e.file_name().to_str() {
+                            eval_hooks.push(format!("evals/{spec_name}/{name}"));
+                        }
+                    }
+                }
+                eval_hooks.sort();
+            }
+        }
+
+        let mut all_passed = true;
+        let mut hook_log: Vec<String> = Vec::new();
+
+        // Run standard hooks.
+        let dummy_task = serde_json::json!({"id": "regen", "spec": spec_name}).to_string();
+        for hook_name in &hooks_to_run {
+            let inv = HookInvocation {
+                hook_name: hook_name.clone(),
+                task_id: "regen".to_string(),
+                spec_name: spec_name.to_string(),
+                iteration: 0,
+                attempt: 0,
+            };
+            let timeout = crate::hooks::hook_timeout(&guardrails, hook_name, config.hooks.default_timeout_secs);
+            let blocking = crate::hooks::is_hook_blocking(&guardrails, hook_name);
+            match run_hook(root, &inv, &dummy_task, timeout) {
+                Ok(outcome) => {
+                    let passed = outcome.exit_code == 0 && !outcome.timed_out;
+                    let entry = format!("  hook {hook_name}: {}", if passed { "PASS" } else { "FAIL" });
+                    println!("{entry}");
+                    hook_log.push(entry);
+                    if blocking && !passed {
+                        all_passed = false;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    println!("  hook {hook_name}: ERROR — {e:#}");
+                    hook_log.push(format!("  hook {hook_name}: ERROR"));
+                    if crate::hooks::is_hook_blocking(&guardrails, hook_name) {
+                        all_passed = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Run eval scripts (Phase 2 oracle).
+        if all_passed {
+            for eval_path in &eval_hooks {
+                let abs_eval = root.join(eval_path);
+                let eval_status = Command::new(&abs_eval)
+                    .current_dir(root)
+                    .env("HARNESS_SPEC", spec_name)
+                    .env("HARNESS_ROOT", root.to_string_lossy().to_string())
+                    .status();
+                match eval_status {
+                    Ok(s) if s.success() => {
+                        println!("  eval {eval_path}: PASS");
+                        hook_log.push(format!("  eval {eval_path}: PASS"));
+                    }
+                    Ok(s) => {
+                        let code = s.code().unwrap_or(-1);
+                        println!("  eval {eval_path}: FAIL (exit {code}) — spec may be ambiguous");
+                        hook_log.push(format!("  eval {eval_path}: FAIL"));
+                        all_passed = false;
+                        break;
+                    }
+                    Err(e) => {
+                        println!("  eval {eval_path}: ERROR — {e:#}");
+                        all_passed = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !all_passed {
+            println!("[{attempt_label}] Gates failed — rolling back.");
+            let _ = git_reset_workdir_basic(root);
+            return Ok((-1, hook_log));
+        }
+
+        // 5. Phase 5: cross-model review gate for public_interface specs.
+        if reqs.public_interface {
+            if let Some(ref reviewer_cmd) = config.agent.reviewer_command {
+                if !reviewer_cmd.is_empty() {
+                    println!("[{attempt_label}] Running cross-model reviewer (public_interface spec)…");
+                    let review_prompt = compose_review_prompt(spec_name, &reqs, &to_burn);
+                    let (review_file, _) = crate::prompt::write_prompt_file(&review_prompt)?;
+                    let rcmd = reviewer_cmd.replace("{prompt_file}", &review_file.to_string_lossy());
+                    let rstatus = if cfg!(windows) {
+                        Command::new("cmd").arg("/C").arg(&rcmd).current_dir(root).status()
+                    } else {
+                        Command::new("sh").arg("-c").arg(&rcmd).current_dir(root).status()
+                    }
+                    .with_context(|| "failed to launch reviewer")?;
+                    let _ = std::fs::remove_file(&review_file);
+                    if rstatus.code().unwrap_or(-1) != 0 {
+                        println!("[{attempt_label}] Reviewer rejected regeneration — rolling back.");
+                        let _ = git_reset_workdir_basic(root);
+                        return Ok((-1, hook_log));
+                    }
+                    println!("[{attempt_label}] Reviewer accepted.");
+                }
+            }
+        }
+
+        // 6. Success: record manifest and commit.
+        record_spec(root, spec_name)
+            .unwrap_or_else(|e| eprintln!("warning: manifest record failed: {e:#}"));
+        let commit_msg = format!("regen: {spec_name}");
+        let _ = git_commit_all(root, &commit_msg);
+        println!("[{attempt_label}] Regeneration complete.");
+        Ok((0, hook_log))
+    };
+
+    let (exit1, _log1) = run_regen("regen")?;
+    if exit1 != 0 {
+        return Ok(exit1);
+    }
+
+    if twice {
+        // Phase 5 determinism probe: regenerate a second time and compare eval results.
+        println!("\n[regen-2] Second pass (determinism probe)…");
+        let (exit2, log2) = run_regen("regen-2")?;
+        if exit2 != 0 {
+            eprintln!("warning: second regeneration failed — spec may be underspecified");
+            println!("Determinism verdict: UNDERSPECIFIED (second pass failed)");
+            return Ok(exit2);
+        }
+        println!("Determinism verdict: CONVERGED (both passes passed evals)");
+        if !log2.is_empty() {
+            println!("Second pass hooks:");
+            for l in &log2 { println!("{l}"); }
+        }
+    }
+
+    Ok(0)
+}
+
+fn git_head_sha(root: &Path) -> Option<String> {
+    Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+fn git_reset_workdir_basic(root: &Path) -> Result<()> {
+    let has_head = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !has_head {
+        return Ok(());
+    }
+    let _ = Command::new("git")
+        .args(["checkout", "HEAD", "--", "."])
+        .current_dir(root)
+        .status();
+    let _ = Command::new("git")
+        .args(["clean", "-fd"])
+        .current_dir(root)
+        .status();
+    Ok(())
+}
+
+fn git_commit_all(root: &Path, message: &str) -> Result<()> {
+    let _ = Command::new("git").args(["add", "-A"]).current_dir(root).status();
+    let _ = Command::new("git").args(["commit", "-m", message]).current_dir(root).status();
+    Ok(())
+}
+
+fn compose_regen_prompt(
+    root: &Path,
+    spec_name: &str,
+    reqs: &crate::spec::RequirementsFile,
+    to_burn: &[String],
+) -> Result<String> {
+    let req_json = serde_json::to_string_pretty(&reqs.requirements).unwrap_or_default();
+    let design_path = spec_dir(root, spec_name).join("2-design.md");
+    let design = if design_path.exists() {
+        std::fs::read_to_string(&design_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let files_list = to_burn.join("\n");
+    Ok(format!(r#"# Regeneration Task: {spec_name}
+
+> **This is a REGENERATION run. The files below have been deleted. Recreate them
+> from scratch using ONLY the spec and design below. Do NOT consult any prior
+> implementation — there is none. Do NOT modify .specs/, evals/, or .harness/.**
+
+## Files to create
+{files_list}
+
+## Requirements
+```json
+{req_json}
+```
+
+## Design
+{design}
+
+## Rules
+- Implement every requirement listed above.
+- Create only the files listed in "Files to create".
+- Leave the project buildable.
+- Do not commit — the harness handles that.
+"#))
+}
+
+fn compose_review_prompt(
+    spec_name: &str,
+    reqs: &crate::spec::RequirementsFile,
+    regenerated_files: &[String],
+) -> String {
+    let req_json = serde_json::to_string_pretty(&reqs.requirements).unwrap_or_default();
+    let files_list = regenerated_files.join("\n");
+    format!(r#"# Cross-Model Review: {spec_name}
+
+You are an independent reviewer. Check the regenerated files listed below against
+the requirements. Exit 0 if the implementation satisfies every requirement.
+Exit non-zero with a clear explanation if any requirement is unmet or the
+implementation has correctness bugs.
+
+## Regenerated files
+{files_list}
+
+## Requirements
+```json
+{req_json}
+```
+
+Be rigorous. The spec is the contract; the code must satisfy it exactly.
+"#)
+}
+
+// ─── spec sync --against-code (Phase 4) ──────────────────────────────────────
+
+/// Drive an agent to reconstruct the spec from owned code, then diff against
+/// the canonical spec to produce a convergence verdict.
+fn cmd_sync_against_code(root: &Path, spec_name: &str) -> Result<()> {
+    let dir = spec_dir(root, spec_name);
+    let reqs = load_requirements(&dir)?;
+
+    if reqs.owns.is_empty() {
+        eprintln!("note: spec '{spec_name}' has no 'owns' declaration — nothing to reconstruct from.");
+        return Ok(());
+    }
+
+    let owned_files = crate::manifest::expand_owned_paths(root, &reqs.owns)?;
+    if owned_files.is_empty() {
+        println!("No owned files found on disk for spec '{spec_name}'.");
+        return Ok(());
+    }
+
+    let out_dir = root.join(".harness").join("roundtrip");
+    std::fs::create_dir_all(&out_dir)?;
+    let out_path = out_dir.join(format!("{spec_name}.reconstructed.md"));
+
+    // Compose the reconstruction prompt.
+    let files_list = owned_files.join("\n");
+    let prompt = format!(r#"# Spec Reconstruction: {spec_name}
+
+Read the source files listed below and reconstruct a spec for them in Markdown.
+Do NOT read or reference any existing spec files under .specs/.
+Write the reconstructed spec to: {out}
+
+Your output must cover:
+1. What each file does and why.
+2. The public interfaces and data contracts.
+3. Any behavior that is NOT documented in the obvious function/type names.
+4. Edge cases and invariants you observe.
+
+## Files to read and analyse
+{files_list}
+
+Write ONLY to the output path above. Do not modify any other file.
+"#, out = out_path.display());
+
+    let config = load_harness_config(root)?;
+    let (prompt_file, _) = crate::prompt::write_prompt_file(&prompt)?;
+    let cmd_str = config.agent.command.replace("{prompt_file}", &prompt_file.to_string_lossy());
+    let working_dir = config.agent.working_dir.as_deref().unwrap_or(".");
+    let wd = root.join(working_dir);
+
+    println!("Running reconstruction agent for '{spec_name}'…");
+    let status = if cfg!(windows) {
+        Command::new("cmd").arg("/C").arg(&cmd_str).current_dir(&wd).status()
+    } else {
+        Command::new("sh").arg("-c").arg(&cmd_str).current_dir(&wd).status()
+    }
+    .with_context(|| "failed to launch reconstruction agent")?;
+    let _ = std::fs::remove_file(&prompt_file);
+
+    if status.code().unwrap_or(-1) != 0 {
+        anyhow::bail!("reconstruction agent failed");
+    }
+
+    if !out_path.exists() {
+        anyhow::bail!(
+            "agent did not write reconstruction to {}",
+            out_path.display()
+        );
+    }
+
+    println!("Reconstruction written to {}", out_path.display());
+
+    // Diff the reconstruction against the canonical spec.
+    let canonical_req = std::fs::read_to_string(dir.join("1-requirements.json")).unwrap_or_default();
+    let canonical_design = std::fs::read_to_string(dir.join("2-design.md")).unwrap_or_default();
+    let reconstructed = std::fs::read_to_string(&out_path).unwrap_or_default();
+
+    // Simple heuristic convergence check: look for requirement IDs in the reconstruction.
+    let req_ids: Vec<&str> = reqs.requirements.iter()
+        .map(|r| r.id.as_str())
+        .collect();
+
+    let mut missing_in_reconstruction: Vec<&str> = Vec::new();
+    for id in &req_ids {
+        if !reconstructed.contains(id) {
+            missing_in_reconstruction.push(id);
+        }
+    }
+
+    // Look for concepts in reconstruction not in the canonical spec (hidden behavior).
+    // A simple proxy: paragraphs in reconstruction that don't reference any req ID.
+    let has_hidden_behavior = reconstructed.lines().any(|line| {
+        let mentions_req = req_ids.iter().any(|id| line.contains(id));
+        !mentions_req && !line.trim().is_empty() && !line.starts_with('#')
+    });
+
+    println!("\n=== Convergence Report: {spec_name} ===");
+    if missing_in_reconstruction.is_empty() && !has_hidden_behavior {
+        println!("Verdict: CONVERGED");
+        println!("  All requirement IDs appear in the reconstruction.");
+        println!("  No obvious hidden behavior detected.");
+    } else {
+        println!("Verdict: DRIFT/UNDERSPECIFIED");
+        if !missing_in_reconstruction.is_empty() {
+            println!("  Implementation drift — code does not reflect these requirements:");
+            for id in &missing_in_reconstruction {
+                println!("    {id}");
+            }
+        }
+        if has_hidden_behavior {
+            println!("  Hidden behavior — reconstruction describes things the spec doesn't:");
+            println!("    Review {} for undocumented behavior.", out_path.display());
+        }
+    }
+
+    // Remind the user that this is advisory.
+    if !canonical_req.is_empty() && !canonical_design.is_empty() {
+        println!(
+            "\nFull diff: diff {:?} {:?} {:?}",
+            dir.join("1-requirements.json"),
+            dir.join("2-design.md"),
+            out_path
+        );
+    }
+    println!("Note: reconstruction output is advisory — human review required before --write.");
+    Ok(())
 }
 
 // ─── scaffold templates ──────────────────────────────────────────────────────
@@ -971,6 +1649,12 @@ default_timeout_secs = 600
 # agent_command = "claude -p --model claude-opus-4-8 --dangerously-skip-permissions < {prompt_file}"
 "#;
 
+const PRE_COMMIT_HOOK: &str = r#"#!/usr/bin/env sh
+# Installed by `harness init` — gates commits on manifest cleanliness.
+# Fails if any spec-owned file was hand-edited or the spec changed without regen.
+harness manifest check --all
+"#;
+
 const GUARDRAILS_TOML: &str = r#"[budgets]
 max_attempts_per_task = 3
 max_iterations = 50
@@ -979,6 +1663,8 @@ max_iterations = 50
 allow = ["src/**", "tests/**", "docs/**"]
 deny = [
   ".specs/**",              # spec files are harness-managed; agents must not alter them
+  "evals/**",               # eval oracles are human-authored; never agent-writable
+  ".harness/manifest.json", # manifest is maintained by the harness
   ".harness/harness.toml",
   ".harness/guardrails/**",
   ".harness/prompts/**",
@@ -987,6 +1673,14 @@ deny = [
   "**/secrets*",
   "**/.env*",
 ]
+
+# Additional paths that are always off-limits for agent writes.
+# [protected]
+# paths = []
+
+# Set to true to enforce task-level write boundaries when tasks declare files_hint.
+# When enabled, any file the agent writes outside files_hint ∪ writes.allow fails the iteration.
+enforce_ownership = false
 
 [operations]
 deny_destructive = true
