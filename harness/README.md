@@ -11,14 +11,30 @@ drives a fresh-context agent over the task list one task at a time and decides
 
 ## Build
 
-The repository is a Cargo workspace with two crates:
+The repository is a Cargo workspace with three crates:
 
 - `harness-core` — the shared data/logic library (config, state, specs, the loop, the snapshot read model).
 - `harness-cli` — the `harness` command-line tool (CLI + terminal dashboard).
+- `harness-gui` — an optional desktop front-end (egui) for authoring a spec's five layers.
 
 ```sh
 cargo build --release
 # binary at target/release/harness
+```
+
+### Desktop GUI
+
+`harness-gui` is a thin front-end over the same CLI. It shows every spec under
+`.specs/` in a left column; selecting one opens an accordion of its five layers
+(requirements → design → tasks → code → evals). Each layer can be generated once
+its upstream layers exist — *Generate* opens a window for an optional prompt
+(only `requirements` accepts one today, as `--brief`), and *Proceed* shells out
+to `harness …`, streaming output into a log pane. The evals layer also offers
+*Run eval suite* (`harness eval run <spec>`). Run it from a project root; it
+finds the `harness` binary via `HARNESS_BIN`, a sibling next to itself, or `PATH`.
+
+```sh
+cargo run -p harness-gui          # from your project root
 ```
 
 ## Quick start
