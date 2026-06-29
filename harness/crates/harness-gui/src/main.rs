@@ -45,6 +45,11 @@ const ACCENT: Color32 = Color32::from_rgb(86, 182, 194);
 const OK: Color32 = Color32::from_rgb(126, 192, 80);
 const FAIL: Color32 = Color32::from_rgb(224, 108, 117);
 const DIM: Color32 = Color32::from_rgb(130, 137, 151);
+/// Slightly lighter than the window background, to set each layer box apart.
+const BOX_BG: Color32 = Color32::from_rgb(38, 42, 50);
+/// Fixed width for the Generate/Regenerate header button so its size doesn't
+/// jump with the label length.
+const GEN_BTN_W: f32 = 96.0;
 
 fn main() -> eframe::Result<()> {
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -120,6 +125,10 @@ struct GuiApp {
     run: Option<RunHandle>,
     log: Vec<String>,
     last_exit: Option<i32>,
+
+    /// One-shot override for every layer's collapsing state, set by the
+    /// "Open all" / "Close all" buttons and cleared after a single frame.
+    set_all_open: Option<bool>,
 }
 
 impl GuiApp {
@@ -137,6 +146,7 @@ impl GuiApp {
             run: None,
             log: Vec::new(),
             last_exit: None,
+            set_all_open: None,
         }
     }
 
@@ -260,6 +270,10 @@ impl GuiApp {
     }
 
     fn central_accordion(&mut self, ctx: &egui::Context) {
+        let mut reload_requested = false;
+        let mut open_all = false;
+        let mut close_all = false;
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let Some(content) = self.content.as_ref() else {
                 ui.centered_and_justified(|ui| {
@@ -273,6 +287,21 @@ impl GuiApp {
                 ui.heading(&spec);
                 ui.add_space(8.0);
                 ui.colored_label(DIM, "requirements → design → tasks → code → evals");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button("⟳ Refresh")
+                        .on_hover_text("Reload from disk")
+                        .clicked()
+                    {
+                        reload_requested = true;
+                    }
+                    if ui.button("Close all").clicked() {
+                        close_all = true;
+                    }
+                    if ui.button("Open all").clicked() {
+                        open_all = true;
+                    }
+                });
             });
             ui.separator();
 
@@ -282,6 +311,18 @@ impl GuiApp {
                 }
             });
         });
+
+        if open_all {
+            self.set_all_open = Some(true);
+        } else if close_all {
+            self.set_all_open = Some(false);
+        } else {
+            // The override only lasts the frame the button was pressed.
+            self.set_all_open = None;
+        }
+        if reload_requested {
+            self.reload();
+        }
     }
 
     /// One accordion section for `layer`: status header, content, controls.
@@ -302,30 +343,79 @@ impl GuiApp {
             LayerStatus::Absent => (DIM, "absent"),
             LayerStatus::Invalid(_) => (FAIL, "invalid"),
         };
+        // Upstream layers still missing — shown as a tooltip on the disabled
+        // Generate button so the reason survives the accordion being collapsed.
+        let missing: Vec<&'static str> = layer
+            .upstream()
+            .iter()
+            .filter(|&&u| !content.state.status(u).is_present())
+            .map(|u| u.label())
+            .collect();
 
-        let header = format!("{}  {}", status.glyph(), layer.label());
-        egui::CollapsingHeader::new(RichText::new(header).color(glyph_color).strong())
-            .id_salt(("layer", layer.label()))
-            .default_open(matches!(
-                status,
-                LayerStatus::Present | LayerStatus::Invalid(_)
-            ))
-            .show(ui, |ui| {
-                // Status line + any validation reason.
-                ui.horizontal(|ui| {
-                    ui.colored_label(glyph_color, word);
+        // e.g. "● requirements (absent)" — status word now lives in the title.
+        let header = format!("{}  {} ({})", status.glyph(), layer.label(), word);
+        let default_open = matches!(status, LayerStatus::Present | LayerStatus::Invalid(_));
+        let set_all_open = self.set_all_open;
+        let running = self.is_running();
+        let spec = content.spec.clone();
+
+        // A bordered, filled box around each layer makes the sections easy to
+        // tell apart from each other and from the window background.
+        egui::Frame::group(ui.style()).fill(BOX_BG).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let id = ui.make_persistent_id(("layer", layer.label()));
+            let mut state =
+                egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    default_open,
+                );
+            if let Some(open) = set_all_open {
+                state.set_open(open);
+            }
+            state
+                .show_header(ui, |ui| {
+                    ui.label(RichText::new(header).color(glyph_color).strong());
+                    // Generate / Regenerate sits at the far right of the header
+                    // row, so it's reachable even when the section is collapsed.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let label = if status.is_present() {
+                            "Regenerate"
+                        } else {
+                            "Generate"
+                        };
+                        let can_generate = upstream_ready && !running;
+                        let mut btn = ui.add_enabled(
+                            can_generate,
+                            egui::Button::new(label).min_size(egui::vec2(GEN_BTN_W, 0.0)),
+                        );
+                        if !missing.is_empty() {
+                            btn = btn.on_disabled_hover_text(format!(
+                                "needs: {}",
+                                missing.join(", ")
+                            ));
+                        }
+                        if btn.clicked() {
+                            self.dialog = Some(GenDialog {
+                                layer,
+                                spec: spec.clone(),
+                                prompt: String::new(),
+                            });
+                        }
+                    });
+                })
+                .body(|ui| {
+                    // Any validation reason (the status word is now in the title).
                     if let LayerStatus::Invalid(why) = &status {
                         ui.colored_label(FAIL, format!("— {why}"));
                     }
+
+                    self.layer_body(ui, layer);
+
+                    self.layer_controls(ui, layer, &status);
                 });
-
-                self.layer_body(ui, layer);
-
-                ui.add_space(6.0);
-                ui.separator();
-                self.layer_controls(ui, layer, &status, upstream_ready);
-            });
-        ui.add_space(2.0);
+        });
+        ui.add_space(4.0);
     }
 
     /// Render the on-disk artifact for `layer`.
@@ -409,14 +499,12 @@ impl GuiApp {
         }
     }
 
-    /// Generate / Run controls for `layer`.
-    fn layer_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        layer: Layer,
-        status: &LayerStatus,
-        upstream_ready: bool,
-    ) {
+    /// In-body controls for `layer`. Generate/Regenerate now lives on the header
+    /// row; only the eval layer keeps an in-body "Run eval suite" button.
+    fn layer_controls(&mut self, ui: &mut egui::Ui, layer: Layer, status: &LayerStatus) {
+        if layer != Layer::Evals {
+            return;
+        }
         let spec = self
             .content
             .as_ref()
@@ -424,48 +512,14 @@ impl GuiApp {
             .unwrap_or_default();
         let running = self.is_running();
 
-        ui.horizontal_wrapped(|ui| {
-            let label = if status.is_present() {
-                "Regenerate"
-            } else {
-                "Generate"
-            };
-            let can_generate = upstream_ready && !running;
-            let btn = ui.add_enabled(can_generate, egui::Button::new(label));
-            if btn.clicked() {
-                self.dialog = Some(GenDialog {
-                    layer,
-                    spec: spec.clone(),
-                    prompt: String::new(),
-                });
-            }
-            if !upstream_ready {
-                let missing: Vec<&str> = layer
-                    .upstream()
-                    .iter()
-                    .filter(|&&u| {
-                        !self
-                            .content
-                            .as_ref()
-                            .map(|c| c.state.status(u).is_present())
-                            .unwrap_or(false)
-                    })
-                    .map(|u| u.label())
-                    .collect();
-                ui.colored_label(DIM, format!("needs: {}", missing.join(", ")));
-            }
-
-            // The eval layer additionally offers running the suite.
-            if layer == Layer::Evals {
-                let can_run = status.is_present() && !running;
-                if ui
-                    .add_enabled(can_run, egui::Button::new("▶ Run eval suite"))
-                    .clicked()
-                {
-                    self.launch(vec!["eval".into(), "run".into(), spec.clone()]);
-                }
-            }
-        });
+        ui.add_space(6.0);
+        let can_run = status.is_present() && !running;
+        if ui
+            .add_enabled(can_run, egui::Button::new("▶ Run eval suite"))
+            .clicked()
+        {
+            self.launch(vec!["eval".into(), "run".into(), spec.clone()]);
+        }
     }
 
     fn bottom_log(&mut self, ctx: &egui::Context) {
