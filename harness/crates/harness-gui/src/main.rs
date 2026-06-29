@@ -71,16 +71,6 @@ enum Tab {
     Phases,
 }
 
-/// What's selected in Trace mode; drives cross-column highlighting.
-#[derive(Clone, PartialEq, Default)]
-pub enum Selection {
-    #[default]
-    None,
-    Requirement(String),
-    Task(String),
-    File(String),
-}
-
 /// Cached spec text for the Run-mode Spec tab.
 struct SpecView {
     spec: String,
@@ -105,11 +95,10 @@ struct HarnessApp {
     log: Vec<String>,
     last_exit: Option<i32>,
 
-    // trace mode
-    trace: Option<SpecTrace>,
-    trace_spec: Option<String>,
-    selection: Selection,
-    confirm_rebuild: bool,
+    // trace mode: every spec, each as a (requirements + design + tasks) unit
+    traces: Vec<SpecTrace>,
+    /// Which spec a destructive Rebuild is awaiting confirmation for.
+    confirm_rebuild: Option<String>,
 }
 
 impl HarnessApp {
@@ -133,10 +122,8 @@ impl HarnessApp {
             run: None,
             log: Vec::new(),
             last_exit: None,
-            trace: None,
-            trace_spec: None,
-            selection: Selection::None,
-            confirm_rebuild: false,
+            traces: Vec::new(),
+            confirm_rebuild: None,
         }
     }
 
@@ -157,8 +144,8 @@ impl HarnessApp {
                 .map(|t| t.id.clone());
         }
         self.last_poll = Instant::now();
-        if self.trace.is_some() {
-            self.reload_trace();
+        if self.mode == Mode::Trace {
+            self.reload_traces();
         }
     }
 
@@ -180,38 +167,19 @@ impl HarnessApp {
         harness_core::spec::list_specs(&self.root).unwrap_or_default()
     }
 
-    /// Pick a spec to trace if none is chosen, and load it if needed.
-    fn ensure_trace(&mut self) {
-        let specs = self.specs();
-        let valid = self
-            .trace_spec
-            .as_ref()
-            .map(|s| specs.contains(s))
-            .unwrap_or(false);
-        if !valid {
-            self.trace_spec = self
-                .snap
-                .state
-                .active_spec
-                .clone()
-                .filter(|s| specs.contains(s))
-                .or_else(|| specs.first().cloned());
-            self.trace = None;
-        }
-        let need = match (&self.trace, &self.trace_spec) {
-            (Some(t), Some(s)) => &t.name != s,
-            (None, Some(_)) => true,
-            _ => false,
-        };
-        if need {
-            self.reload_trace();
+    /// Load all specs' traces on first entry to Trace mode.
+    fn ensure_traces(&mut self) {
+        if self.traces.is_empty() {
+            self.reload_traces();
         }
     }
 
-    fn reload_trace(&mut self) {
-        if let Some(s) = self.trace_spec.clone() {
-            self.trace = SpecTrace::load(&self.root, &s).ok();
-        }
+    fn reload_traces(&mut self) {
+        self.traces = self
+            .specs()
+            .iter()
+            .filter_map(|s| SpecTrace::load(&self.root, s).ok())
+            .collect();
     }
 
     // ── job control ──────────────────────────────────────────────────────────
