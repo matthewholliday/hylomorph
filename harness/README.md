@@ -11,18 +11,14 @@ drives a fresh-context agent over the task list one task at a time and decides
 
 ## Build
 
-The repository is a Cargo workspace with three crates:
+The repository is a Cargo workspace with two crates:
 
 - `harness-core` — the shared data/logic library (config, state, specs, the loop, the snapshot read model).
 - `harness-cli` — the `harness` command-line tool (CLI + terminal dashboard).
-- `harness-gui` — an optional desktop dashboard (egui).
 
 ```sh
-cargo build --release                  # builds every crate
-# CLI binary at target/release/harness
-# GUI binary at target/release/harness-gui
-
-cargo build --release -p harness-cli   # CLI only (no egui dependencies)
+cargo build --release
+# binary at target/release/harness
 ```
 
 ## Quick start
@@ -142,50 +138,12 @@ For a lighter-weight, log-only view (no TUI), `harness log --follow` streams a
 one-line summary of each iteration as it completes — handy over SSH or when piping
 to a file.
 
-### Desktop app (egui)
-
-`harness-gui` is a native desktop app with two top-level modes, both reading the
-same on-disk state:
-
-```sh
-harness-gui                 # search upward from the cwd for a .harness/ project
-harness-gui /path/to/proj   # or point it at a project root
-```
-
-Like `watch`, it never owns run state — it reads the loop's files on a timer and
-drives runs/sync by shelling out to the `harness` CLI. It resolves the CLI as
-`$HARNESS_BIN`, else a `harness` binary next to `harness-gui`, else `harness` on
-`PATH`.
-
-**Trace mode** (default) — a two-column **Spec ⟷ Code** view. This mirrors the
-single boundary the manifest actually tracks per spec: the spec inputs *as one
-unit* (requirements + design + tasks, combined into one hash) versus the owned
-code (hashed per file). The left column lists every specification, each as one
-self-contained block — its requirements, design, and tasks together (a spec is
-exactly one of each) — and the right column lists each spec's owned code files.
-Because harness is spec-as-source, sync is directional (`SPEC ──▶ CODE`). Each
-block shows:
-
-- **Sync state** — `in sync` / `stale` (spec edited since baseline) / `drift`
-  (owned file changed out-of-band) / `unrecorded`, with per-file drift markers in
-  the Code column.
-- **Generation progress** — done/total tasks for that spec (validated code-gen).
-- **Coverage** — requirements with no covering task are flagged (`⚠ no task`).
-- **Sync actions** — *Check* (report drift), *Build* (make code conform to the
-  spec), *Rebuild* (destructive re-render, with confirmation), *Accept baseline*
-  (record current state). The reverse direction (code → spec) is intentionally
-  not a button — drift is surfaced and resolved by reverting or re-baselining.
-
-**Run mode** — the live loop dashboard: run status (`RUNNING` / `IDLE` /
-`COMPLETE` / `BLOCKED`), a done/active/todo/blocked gauge, the task table
-(in-progress first, with attempts and phase progress), a task-detail pane (latest
-iteration's agent exit, per-hook pass/fail + timings, commit sha, last failure),
-colorized `progress.md` tail, live agent output, a per-task phase grid, and
-**Start/Stop** controls that launch `harness build` with options. Both modes
-auto-refresh ~every 0.4s.
-
-The terminal `harness watch` dashboard remains for headless/SSH use; its keys are
-`↑/↓` select · `g/G` jump to top/bottom · `r` force refresh · `q` quit.
+The `harness watch` dashboard shows run status, a done/active/todo/blocked gauge,
+the task table (in-progress first, with attempts and phase progress), a
+task-detail pane (latest iteration's agent exit, per-hook pass/fail + timings,
+commit sha, last failure), and a colorized `progress.md` tail. It auto-refreshes
+~every 0.4s. Keys: `↑/↓` select · `g/G` jump to top/bottom · `r` force refresh ·
+`q` quit.
 
 ## Hook contract
 

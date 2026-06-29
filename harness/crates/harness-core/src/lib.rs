@@ -1,10 +1,9 @@
-//! `harness-core` — the project-agnostic data and logic layer shared by every
-//! Harness front-end.
+//! `harness-core` — the project-agnostic data and logic layer behind the
+//! `harness` CLI.
 //!
-//! The CLI (`harness-cli`) and the desktop GUI (`harness-gui`) both depend on
-//! this crate. All run state lives on disk under `.harness/` and `.specs/`; the
-//! modules here read, write, and validate that state. The [`snapshot`] module is
-//! the UI-agnostic read model both front-ends render from.
+//! All run state lives on disk under `.harness/` and `.specs/`; the modules here
+//! read, write, and validate that state. The [`snapshot`] module is the
+//! UI-agnostic read model the terminal dashboard renders from.
 
 pub mod config;
 pub mod hooks;
@@ -14,5 +13,4 @@ pub mod prompt;
 pub mod snapshot;
 pub mod spec;
 pub mod state;
-pub mod trace;
 pub mod util;
