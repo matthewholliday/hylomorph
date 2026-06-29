@@ -23,11 +23,40 @@ cd your-project
 git init                         # rollback boundary; recommended
 harness init                     # scaffold .harness/
 # edit .harness/scripts/hooks/* to run your real build/test/lint
-# author a spec under .specs/<name>/ (1-requirements.json, 2-design.md, 3-tasks.jsonl)
+
+# Build the spec one layer at a time — each step is gated on the one before it:
+harness spec requirements <name> --brief "what it should do"   # layer 1
+harness spec design <name>                                     # layer 2 (needs requirements)
+harness spec tasks <name>                                      # layer 3 (needs design)
+# …or run all three in order at once:  harness spec new <name> --brief "…"
+
 harness check <name>             # spec well-formed + eval coverage + drift
-harness build <name> --dry-run --once   # preview task selection
-harness build <name>             # render code, task by task
+harness build <name>             # layer 4: generate code (needs requirements+design+tasks)
+harness eval draft <name>        # layer 5: draft evals (needs code)
 ```
+
+## The five-layer model
+
+A spec is built as a **vertical slice** of five layers, produced strictly in
+order. Each layer is the input to the next, and the harness makes it
+*structurally impossible* to skip ahead — the gate is enforced before any agent
+runs, not left to the agent's judgement:
+
+```
+requirements → design → tasks → code → evals
+```
+
+| layer | artifact | command | requires |
+|---|---|---|---|
+| 1 requirements | `.specs/<name>/1-requirements.json` | `harness spec requirements` | — |
+| 2 design | `.specs/<name>/2-design.md` | `harness spec design` | requirements |
+| 3 tasks | `.specs/<name>/3-tasks.jsonl` | `harness spec tasks` | + design |
+| 4 code | files matched by the spec's `owns` globs | `harness build` | + tasks |
+| 5 evals | `evals/<name>/*` | `harness eval draft` | + code |
+
+Run `harness spec status <name>` to see which layers exist and the single next
+allowed action. Each drafting command is also **write-scoped**: it may only
+touch its own layer's file(s); anything it writes elsewhere is reverted.
 
 ## Guided setup (optional Claude Code agent)
 
@@ -65,11 +94,15 @@ The CLI follows one grammar: top-level **verbs** for the lifecycle (`build`,
 | `harness check <spec> --reverse` | Reconstruct the spec from code and report convergence (advisory). |
 | `harness check <spec> --determinism` | Rebuild twice and compare eval results (spec-tightness probe). |
 | `harness check <spec> --accept` | Accept the current code as the spec's baseline (escape hatch). |
-| `harness spec new <name> [--brief "…" \| --from <file> \| -]` | Draft a spec from a brief (agent-assisted). |
+| `harness spec requirements <name> [--brief "…" \| --from <file> \| -]` | Layer 1: draft requirements from a brief. |
+| `harness spec design <name>` | Layer 2: draft a design from the requirements (gated on layer 1). |
+| `harness spec tasks <name>` | Layer 3: draft tasks from the design (gated on layers 1–2). |
+| `harness spec new <name> [--brief "…" \| --from <file> \| -]` | Run layers 1→3 in order, each gated (convenience wrapper). |
+| `harness spec status <name>` | Show the five-layer ladder and the next allowed action. |
 | `harness spec edit <name> [requirements\|design\|tasks]` | Open a spec file in `$EDITOR`, then check it. |
 | `harness spec show <name>` | Print a spec's resolved contents. |
 | `harness spec ls` | List specs under `.specs/`. |
-| `harness spec tasks <name> [--fix]` | Report requirement↔task coverage; `--fix` writes task stubs. |
+| `harness spec coverage <name> [--fix]` | Report requirement↔task coverage; `--fix` writes task stubs. |
 | `harness eval ls <spec>` | List eval scripts for a spec. |
 | `harness eval run <spec>` | Run a spec's evals against the current code. |
 | `harness eval draft <spec> [--force] [--use-code-agent]` | Draft reviewable eval stubs from the spec's acceptance criteria. Uses the independent reviewer model by default. |
@@ -268,7 +301,8 @@ done on the agent's say-so.
 
 ## Status
 
-v0.1. Implemented: the full loop, gates, spec authoring/checking, drift
-detection (`check`), burn-and-rebuild (`rebuild`), evals, logging, and all CLI
-commands above. Not yet implemented: full task regeneration from requirements
-(`spec tasks` only writes stubs today) and write-allowlist sandboxing.
+v0.1. Implemented: the full loop, gates, the gated five-layer pipeline
+(requirements → design → tasks → code → evals) with per-layer write scoping,
+drift detection (`check`), burn-and-rebuild (`rebuild`), evals, logging, and all
+CLI commands above. Not yet implemented: full deterministic task regeneration
+from requirements (`spec coverage --fix` only writes stubs today).

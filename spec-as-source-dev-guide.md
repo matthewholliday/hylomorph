@@ -352,7 +352,11 @@ That's it. Everything else — pace layers, determinism probes, round-trip sync 
 | Command | What it does |
 |---|---|
 | `harness init` | Scaffold `.harness/`, `evals/`, pre-commit gate |
-| `harness spec new <name> --brief "..."` | Agent drafts a spec from a brief |
+| `harness spec requirements <name> --brief "..."` | Layer 1: draft requirements from a brief |
+| `harness spec design <name>` | Layer 2: draft design (gated on requirements) |
+| `harness spec tasks <name>` | Layer 3: draft tasks (gated on design) |
+| `harness spec new <name> --brief "..."` | Run layers 1→3 in order, each gated |
+| `harness spec status <name>` | Show the five-layer ladder + next allowed action |
 | `harness check <name>` | Spec well-formed + eval coverage + drift |
 | `harness build <name>` | Incremental render loop (spec-anchored) |
 | `harness check --all` | Detect drift; exits 2 on any |

@@ -7,9 +7,11 @@
 
 pub mod config;
 pub mod hooks;
+pub mod layers;
 pub mod loop_runner;
 pub mod manifest;
 pub mod prompt;
+pub mod scope;
 pub mod snapshot;
 pub mod spec;
 pub mod state;

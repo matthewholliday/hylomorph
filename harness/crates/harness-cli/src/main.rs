@@ -9,9 +9,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use harness_core::config::{find_project_root, load_harness_config};
 use harness_core::hooks::{run_hook, HookInvocation};
+use harness_core::layers::{layer_state, require, Layer};
 use harness_core::loop_runner::{run, RunOptions};
 use harness_core::manifest::{check_spec, record_spec, DriftKind};
 use harness_core::prompt::compose_prompt;
+use harness_core::scope::{dirty_paths, enforce, WriteScope};
 use harness_core::spec::{
     list_specs, load_requirements, load_tasks, save_tasks, spec_dir, Task, TaskStatus,
 };
@@ -172,7 +174,9 @@ enum SpecPart {
 enum SpecCmd {
     /// List specs under .specs/.
     Ls,
-    /// Draft a new spec from a brief (agent-assisted).
+    /// Show the five-layer ladder for a spec and the next allowed action.
+    Status { name: String },
+    /// Draft a whole spec: requirements → design → tasks, each gated in order.
     New {
         name: String,
         /// Inline brief: what the spec should do (quoted string).
@@ -182,6 +186,20 @@ enum SpecCmd {
         #[arg(long)]
         from: Option<PathBuf>,
     },
+    /// Layer 1: draft requirements from a brief (no upstream required).
+    Requirements {
+        name: String,
+        /// Inline brief: what the spec should do (quoted string).
+        #[arg(long)]
+        brief: Option<String>,
+        /// Brief file (.md/.txt/any text), or `-` for stdin.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
+    /// Layer 2: draft a design from the requirements (requires requirements).
+    Design { name: String },
+    /// Layer 3: draft tasks from the design (requires requirements + design).
+    Tasks { name: String },
     /// Open a spec file in $EDITOR, then check it.
     Edit {
         name: String,
@@ -191,7 +209,7 @@ enum SpecCmd {
     /// Print a spec's resolved contents.
     Show { name: String },
     /// Report requirement↔task coverage; --fix writes task stubs.
-    Tasks {
+    Coverage {
         name: String,
         #[arg(long)]
         fix: bool,
@@ -453,6 +471,20 @@ fn cmd_build(
 ) -> Result<i32> {
     // `--all` (or no spec) means "every in-scope spec" → no filter.
     let spec_filter = if all { None } else { spec };
+
+    // GATE: code may only be generated once requirements + design + tasks exist
+    // for every spec in scope. Enforced here, before the loop runs.
+    let targets = resolve_specs(root, spec_filter.clone(), all, true)?;
+    for name in &targets {
+        let state = layer_state(root, name);
+        require(
+            &state,
+            "generate code",
+            &[Layer::Requirements, Layer::Design, Layer::Tasks],
+            name,
+        )?;
+    }
+
     run(
         root,
         RunOptions {
@@ -584,7 +616,9 @@ fn cmd_init(root: &Path, _from_specs: bool, force: bool) -> Result<()> {
         ("guardrails/rules.md", RULES_MD),
         ("prompts/loop.md", LOOP_MD),
         ("prompts/init.md", INIT_MD),
-        ("prompts/draft-spec.md", DRAFT_SPEC_PROMPT),
+        ("prompts/draft-requirements.md", DRAFT_REQUIREMENTS_PROMPT),
+        ("prompts/draft-design.md", DRAFT_DESIGN_PROMPT),
+        ("prompts/draft-tasks.md", DRAFT_TASKS_PROMPT),
         ("prompts/draft-eval.md", DRAFT_EVAL_PROMPT),
         ("logs/progress.md", "# Progress\n\n"),
         ("logs/state.json", "{\"active_spec\":null,\"iteration_count\":0,\"last_task_id\":null,\"last_task_status\":null,\"run_start\":null}\n"),
@@ -697,7 +731,13 @@ fn cmd_spec(root: &Path, cmd: SpecCmd) -> Result<i32> {
             }
             Ok(0)
         }
-        SpecCmd::New { name, brief, from } => cmd_spec_draft(root, &name, brief, from, false),
+        SpecCmd::Status { name } => cmd_spec_status(root, &name),
+        SpecCmd::New { name, brief, from } => cmd_spec_new(root, &name, brief, from),
+        SpecCmd::Requirements { name, brief, from } => {
+            cmd_draft_requirements(root, &name, brief, from, false)
+        }
+        SpecCmd::Design { name } => cmd_draft_design(root, &name),
+        SpecCmd::Tasks { name } => cmd_draft_tasks(root, &name),
         SpecCmd::Draft {
             name,
             brief,
@@ -705,11 +745,13 @@ fn cmd_spec(root: &Path, cmd: SpecCmd) -> Result<i32> {
             interactive,
         } => {
             deprecate("spec draft", "spec new");
-            cmd_spec_draft(root, &name, brief, from, interactive)
+            // The deprecated monolithic draft now runs the gated layer pipeline.
+            let _ = interactive;
+            cmd_spec_new(root, &name, brief, from)
         }
         SpecCmd::Edit { name, part } => cmd_spec_edit(root, &name, part),
         SpecCmd::Show { name } => cmd_spec_show(root, &name),
-        SpecCmd::Tasks { name, fix } => {
+        SpecCmd::Coverage { name, fix } => {
             cmd_sync(root, &name, fix, false)?;
             Ok(0)
         }
@@ -728,7 +770,7 @@ fn cmd_spec(root: &Path, cmd: SpecCmd) -> Result<i32> {
                 if against_code {
                     "check --reverse"
                 } else {
-                    "spec tasks"
+                    "spec coverage"
                 },
             );
             if against_code {
@@ -777,16 +819,8 @@ fn cmd_spec_show(root: &Path, name: &str) -> Result<i32> {
     Ok(0)
 }
 
-fn cmd_spec_draft(
-    root: &Path,
-    name: &str,
-    brief: Option<String>,
-    from: Option<PathBuf>,
-    interactive: bool,
-) -> Result<i32> {
-    use std::io::Read as _;
-
-    // ── 1. Validate the spec name slug ────────────────────────────────────────
+/// Validate that a spec name is a safe slug.
+fn validate_spec_name(name: &str) -> Result<()> {
     if !name
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
@@ -794,8 +828,12 @@ fn cmd_spec_draft(
     {
         anyhow::bail!("spec name must match ^[a-z0-9][a-z0-9-]*$ — got '{name}'");
     }
+    Ok(())
+}
 
-    // ── 2. Read the brief ─────────────────────────────────────────────────────
+/// Read a brief from `--brief`, `--from <file>`, `--from -`, or interactive stdin.
+fn read_brief(brief: Option<String>, from: Option<PathBuf>, interactive: bool) -> Result<String> {
+    use std::io::Read as _;
     let brief_text = match (brief, from) {
         (Some(b), _) => b,
         (None, Some(path)) if path == *"-" => {
@@ -808,17 +846,11 @@ fn cmd_spec_draft(
         (None, Some(path)) => std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read brief from {}", path.display()))?,
         (None, None) if interactive => {
-            // Explicit opt-in: read from stdin with a prompt. Only the
-            // `--interactive` flag enables this blocking read so the command
-            // never hangs waiting on an EOF that may never come.
             eprintln!("Brief (describe what this spec should do; end with Ctrl-D):");
             let mut s = String::new();
             std::io::stdin()
                 .read_to_string(&mut s)
                 .context("failed to read brief from stdin")?;
-            if s.trim().is_empty() {
-                anyhow::bail!("no brief supplied on stdin");
-            }
             s
         }
         (None, None) => {
@@ -828,35 +860,25 @@ fn cmd_spec_draft(
             );
         }
     };
-
     if brief_text.trim().is_empty() {
         anyhow::bail!("brief is empty");
     }
+    Ok(brief_text)
+}
 
-    // ── 3. Ensure the spec dir exists ─────────────────────────────────────────
-    let dir = spec_dir(root, name);
-    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-
-    // ── 4. Compose the drafting prompt ────────────────────────────────────────
-    // Prefer the project-local override so users can customise without
-    // rebuilding the binary; fall back to the compiled-in template.
-    let local_template_path = root.join(".harness").join("prompts").join("draft-spec.md");
-    let template = if local_template_path.exists() {
-        std::fs::read_to_string(&local_template_path)
-            .unwrap_or_else(|_| DRAFT_SPEC_PROMPT.to_string())
-    } else {
-        DRAFT_SPEC_PROMPT.to_string()
-    };
-    let prompt = template
-        .replace("{spec_name}", name)
-        .replace("{brief}", brief_text.trim());
-
-    // Write the prompt to a temp file.
-    let prompt_path = std::env::temp_dir().join(format!("harness-draft-{name}.md"));
-    std::fs::write(&prompt_path, &prompt)
+/// Launch the configured agent on a composed prompt, confining its writes to
+/// `scope_globs`. Any file the agent touches outside that scope is reverted
+/// before the function returns — so a layer command physically cannot leak
+/// writes into another layer's files.
+fn run_layer_agent(root: &Path, layer: Layer, prompt: &str, scope_globs: &[String]) -> Result<()> {
+    let prompt_path = std::env::temp_dir().join(format!(
+        "harness-draft-{}-{}.md",
+        layer.label(),
+        std::process::id()
+    ));
+    std::fs::write(&prompt_path, prompt)
         .with_context(|| format!("failed to write draft prompt to {}", prompt_path.display()))?;
 
-    // ── 5. Run the agent ──────────────────────────────────────────────────────
     let config = load_harness_config(root)?;
     let cmd_str = config
         .agent
@@ -865,10 +887,10 @@ fn cmd_spec_draft(
     let working_dir = config.agent.working_dir.as_deref().unwrap_or(".");
     let wd = root.join(working_dir);
 
-    println!("Drafting spec '{name}' — running agent…");
-    println!(
-        "(The agent will write .specs/{name}/1-requirements.json, 2-design.md, 3-tasks.jsonl)\n"
-    );
+    // Snapshot what's already dirty so enforcement only reverts the agent's own
+    // out-of-scope writes, never pre-existing local edits.
+    let before = dirty_paths(root);
+    let scope = WriteScope::new(scope_globs)?;
 
     let status = if cfg!(windows) {
         Command::new("cmd")
@@ -892,16 +914,158 @@ fn cmd_spec_draft(
         anyhow::bail!("agent exited {agent_exit} — check agent adapter config");
     }
 
-    // ── 6. Validate what the agent wrote ─────────────────────────────────────
-    println!("\nValidating generated spec…");
+    // Enforce write scope: revert anything outside the allowed globs.
+    let reverted = enforce(root, &before, &scope);
+    if !reverted.is_empty() {
+        eprintln!(
+            "⚠ reverted {} out-of-scope write(s) — the '{}' layer may only write {}:",
+            reverted.len(),
+            layer.label(),
+            scope_globs.join(", ")
+        );
+        for p in &reverted {
+            eprintln!("    {p}");
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a drafting prompt template: project-local override or compiled-in.
+fn resolve_template(root: &Path, local_name: &str, builtin: &str) -> String {
+    let local = root.join(".harness").join("prompts").join(local_name);
+    if local.exists() {
+        std::fs::read_to_string(&local).unwrap_or_else(|_| builtin.to_string())
+    } else {
+        builtin.to_string()
+    }
+}
+
+// ─── layer 1: requirements ───────────────────────────────────────────────────
+
+fn cmd_draft_requirements(
+    root: &Path,
+    name: &str,
+    brief: Option<String>,
+    from: Option<PathBuf>,
+    interactive: bool,
+) -> Result<i32> {
+    validate_spec_name(name)?;
+    let brief_text = read_brief(brief, from, interactive)?;
+
+    let dir = spec_dir(root, name);
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+
+    let template = resolve_template(root, "draft-requirements.md", DRAFT_REQUIREMENTS_PROMPT);
+    let prompt = template
+        .replace("{spec_name}", name)
+        .replace("{brief}", brief_text.trim());
+
+    println!("Drafting requirements for '{name}' — running agent…");
+    println!("(The agent may write only .specs/{name}/1-requirements.json)\n");
+
+    run_layer_agent(
+        root,
+        Layer::Requirements,
+        &prompt,
+        &[format!(".specs/{name}/1-requirements.json")],
+    )?;
+
+    match load_requirements(&dir) {
+        Ok(_) => {
+            println!("\n✓ wrote .specs/{name}/1-requirements.json");
+            println!("Next:  harness spec design {name}");
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("\n✗ 1-requirements.json missing or invalid: {e:#}");
+            Ok(1)
+        }
+    }
+}
+
+// ─── layer 2: design ─────────────────────────────────────────────────────────
+
+fn cmd_draft_design(root: &Path, name: &str) -> Result<i32> {
+    validate_spec_name(name)?;
+    let dir = spec_dir(root, name);
+
+    // GATE: requirements must already exist.
+    let state = layer_state(root, name);
+    require(&state, "draft design", &[Layer::Requirements], name)?;
+
+    let reqs = load_requirements(&dir)?;
+    let requirements_json =
+        serde_json::to_string_pretty(&reqs).context("failed to serialize requirements")?;
+
+    let template = resolve_template(root, "draft-design.md", DRAFT_DESIGN_PROMPT);
+    let prompt = template
+        .replace("{spec_name}", name)
+        .replace("{requirements}", &requirements_json);
+
+    println!("Drafting design for '{name}' — running agent…");
+    println!("(The agent may write only .specs/{name}/2-design.md)\n");
+
+    run_layer_agent(
+        root,
+        Layer::Design,
+        &prompt,
+        &[format!(".specs/{name}/2-design.md")],
+    )?;
+
+    let design_path = dir.join("2-design.md");
+    if design_path.exists() {
+        println!("\n✓ wrote .specs/{name}/2-design.md");
+        println!("Next:  harness spec tasks {name}");
+        Ok(0)
+    } else {
+        eprintln!("\n✗ 2-design.md was not written");
+        Ok(1)
+    }
+}
+
+// ─── layer 3: tasks ──────────────────────────────────────────────────────────
+
+fn cmd_draft_tasks(root: &Path, name: &str) -> Result<i32> {
+    validate_spec_name(name)?;
+    let dir = spec_dir(root, name);
+
+    // GATE: requirements + design must already exist.
+    let state = layer_state(root, name);
+    require(
+        &state,
+        "draft tasks",
+        &[Layer::Requirements, Layer::Design],
+        name,
+    )?;
+
+    let reqs = load_requirements(&dir)?;
+    let requirements_json =
+        serde_json::to_string_pretty(&reqs).context("failed to serialize requirements")?;
+    let design = std::fs::read_to_string(dir.join("2-design.md")).unwrap_or_default();
+
+    let template = resolve_template(root, "draft-tasks.md", DRAFT_TASKS_PROMPT);
+    let prompt = template
+        .replace("{spec_name}", name)
+        .replace("{requirements}", &requirements_json)
+        .replace("{design}", &design);
+
+    println!("Drafting tasks for '{name}' — running agent…");
+    println!("(The agent may write only .specs/{name}/3-tasks.jsonl)\n");
+
+    run_layer_agent(
+        root,
+        Layer::Tasks,
+        &prompt,
+        &[format!(".specs/{name}/3-tasks.jsonl")],
+    )?;
+
+    println!("\nValidating spec…");
     match validate_spec(root, name) {
         Ok(()) => {
             println!("✓ .specs/{name}/ is valid\n");
             println!("Next steps:");
-            println!("  harness check {name}                # re-check any edits");
-            println!("  harness spec tasks {name}           # requirement↔task coverage");
-            println!("  harness build {name} --dry-run --once");
-            println!("  harness build {name}");
+            println!("  harness build {name} --dry-run --once   # preview task selection");
+            println!("  harness build {name}                    # generate code");
             Ok(0)
         }
         Err(e) => {
@@ -911,6 +1075,57 @@ fn cmd_spec_draft(
             Ok(1)
         }
     }
+}
+
+// ─── spec new: the full gated pipeline ───────────────────────────────────────
+
+/// Draft a whole spec by running the three layer steps in order. Each step is
+/// gated exactly as if it were invoked on its own, so the convenience path can
+/// never skip a layer.
+fn cmd_spec_new(
+    root: &Path,
+    name: &str,
+    brief: Option<String>,
+    from: Option<PathBuf>,
+) -> Result<i32> {
+    validate_spec_name(name)?;
+    // Read the brief once, up front, so a missing brief fails before any agent runs.
+    let brief_text = read_brief(brief, from, false)?;
+
+    let code = cmd_draft_requirements(root, name, Some(brief_text), None, false)?;
+    if code != 0 {
+        return Ok(code);
+    }
+    let code = cmd_draft_design(root, name)?;
+    if code != 0 {
+        return Ok(code);
+    }
+    cmd_draft_tasks(root, name)
+}
+
+// ─── spec status: the layer ladder ───────────────────────────────────────────
+
+fn cmd_spec_status(root: &Path, name: &str) -> Result<i32> {
+    let dir = spec_dir(root, name);
+    if !dir.exists() {
+        anyhow::bail!("spec '{name}' not found at {}", dir.display());
+    }
+    let state = layer_state(root, name);
+    println!("Spec '{name}' — layer status:\n");
+    for layer in Layer::ALL {
+        let status = state.status(layer);
+        let detail = match status {
+            harness_core::layers::LayerStatus::Invalid(why) => format!("  ({why})"),
+            _ => String::new(),
+        };
+        println!("  {} {}{}", status.glyph(), layer.label(), detail);
+    }
+    println!();
+    match state.next_producible() {
+        Some(next) => println!("Next allowed action:  {}", next.produce_cmd(name)),
+        None => println!("All five layers are present."),
+    }
+    Ok(0)
 }
 
 fn validate_spec(root: &Path, name: &str) -> Result<()> {
@@ -1295,7 +1510,7 @@ fn cmd_eval(root: &Path, cmd: EvalCmd) -> Result<i32> {
 
 /// Draft eval stubs from a spec's requirement acceptance criteria.
 ///
-/// This mirrors `cmd_spec_draft`: compose a prompt from a template, run an agent,
+/// This mirrors the layer-draft commands: compose a prompt from a template, run an agent,
 /// then leave the result for a human to review. The crucial difference from spec
 /// drafting is *independence* — the eval is meant to be an oracle that does not
 /// trust the code agent's reading of the spec. So by default we drive the draft
@@ -1312,6 +1527,22 @@ fn cmd_eval_draft(root: &Path, spec: &str, force: bool, use_code_agent: bool) ->
             dir.display()
         );
     }
+
+    // GATE: evals may only be generated once requirements + design + tasks +
+    // code all exist. Enforced here, before any agent runs.
+    let state = layer_state(root, spec);
+    require(
+        &state,
+        "generate evals",
+        &[
+            Layer::Requirements,
+            Layer::Design,
+            Layer::Tasks,
+            Layer::Code,
+        ],
+        spec,
+    )?;
+
     let reqs = load_requirements(&dir)
         .with_context(|| format!(".specs/{spec}/1-requirements.json failed to parse"))?;
     if reqs.requirements.is_empty() {
@@ -1397,7 +1628,11 @@ fn cmd_eval_draft(root: &Path, spec: &str, force: bool, use_code_agent: bool) ->
     let wd = root.join(working_dir);
 
     println!("Drafting evals for '{spec}' using the {model_label}…");
-    println!("(The agent will write stub scripts to evals/{spec}/)\n");
+    println!("(The agent may write only evals/{spec}/)\n");
+
+    // Confine the eval drafter to the spec's eval directory.
+    let before = dirty_paths(root);
+    let eval_scope = WriteScope::new(&[format!("evals/{spec}/**")])?;
 
     let status = if cfg!(windows) {
         Command::new("cmd")
@@ -1419,6 +1654,18 @@ fn cmd_eval_draft(root: &Path, spec: &str, force: bool, use_code_agent: bool) ->
     let agent_exit = status.code().unwrap_or(-1);
     if agent_exit != 0 {
         anyhow::bail!("agent exited {agent_exit} — check agent adapter config");
+    }
+
+    // Enforce write scope: revert anything written outside evals/<spec>/.
+    let reverted = enforce(root, &before, &eval_scope);
+    if !reverted.is_empty() {
+        eprintln!(
+            "⚠ reverted {} out-of-scope write(s) — eval drafting may only write evals/{spec}/:",
+            reverted.len()
+        );
+        for p in &reverted {
+            eprintln!("    {p}");
+        }
     }
 
     // ── 6. Make the stubs executable and report ───────────────────────────────
@@ -2462,8 +2709,11 @@ Write ONLY to the output path above. Do not modify any other file.
 /// Claude Code subagent definition, installed to .claude/agents/ by `init`.
 const SETUP_AGENT: &str = include_str!("../templates/harness-setup.md");
 
-/// Prompt template used by `spec draft` to drive the agent.
-const DRAFT_SPEC_PROMPT: &str = include_str!("../templates/draft-spec.md");
+/// Per-layer drafting prompts. Each drives the agent to produce exactly one
+/// layer of a spec's vertical slice; the harness gates ordering and write scope.
+const DRAFT_REQUIREMENTS_PROMPT: &str = include_str!("../templates/draft-requirements.md");
+const DRAFT_DESIGN_PROMPT: &str = include_str!("../templates/draft-design.md");
+const DRAFT_TASKS_PROMPT: &str = include_str!("../templates/draft-tasks.md");
 
 /// Prompt template used by `eval draft` to drive the agent.
 const DRAFT_EVAL_PROMPT: &str = include_str!("../templates/draft-eval.md");
