@@ -53,28 +53,35 @@ fn harness_bin() -> PathBuf {
 }
 
 impl RunHandle {
-    /// Spawn `harness build` for `root` with the given options. A reader thread
-    /// merges stdout and stderr into the returned handle's channel.
+    /// Spawn `harness build` for `root` with the given options.
     pub fn spawn(root: &Path, opts: &RunOptions) -> anyhow::Result<RunHandle> {
-        let mut cmd = Command::new(harness_bin());
-        cmd.arg("build");
+        let mut args = vec!["build".to_string()];
         if !opts.spec.trim().is_empty() {
-            cmd.arg(opts.spec.trim());
+            args.push(opts.spec.trim().to_string());
         } else {
-            cmd.arg("--all");
+            args.push("--all".to_string());
         }
         if opts.once {
-            cmd.arg("--once");
+            args.push("--once".to_string());
         }
         if opts.dry_run {
-            cmd.arg("--dry-run");
+            args.push("--dry-run".to_string());
         }
         if let Ok(n) = opts.max.trim().parse::<u32>() {
             if n > 0 {
-                cmd.arg("--max").arg(n.to_string());
+                args.push("--max".to_string());
+                args.push(n.to_string());
             }
         }
-        cmd.current_dir(root)
+        Self::spawn_args(root, &args)
+    }
+
+    /// Spawn `harness <args...>` in `root`. A reader thread merges stdout and
+    /// stderr into the returned handle's channel.
+    pub fn spawn_args(root: &Path, args: &[String]) -> anyhow::Result<RunHandle> {
+        let mut cmd = Command::new(harness_bin());
+        cmd.args(args)
+            .current_dir(root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 

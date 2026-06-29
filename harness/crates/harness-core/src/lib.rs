@@ -14,4 +14,5 @@ pub mod prompt;
 pub mod snapshot;
 pub mod spec;
 pub mod state;
+pub mod trace;
 pub mod util;

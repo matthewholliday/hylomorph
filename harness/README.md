@@ -142,38 +142,48 @@ For a lighter-weight, log-only view (no TUI), `harness log --follow` streams a
 one-line summary of each iteration as it completes — handy over SSH or when piping
 to a file.
 
-### Desktop dashboard (egui)
+### Desktop app (egui)
 
-`harness-gui` is a native desktop dashboard rendering the same on-disk state as
-`harness watch`, plus things a terminal can't do well: **Start/Stop** controls
-that launch `harness build` for you, live streaming of the run's output, a spec
-browser, and a per-task phase grid.
+`harness-gui` is a native desktop app with two top-level modes, both reading the
+same on-disk state:
 
 ```sh
 harness-gui                 # search upward from the cwd for a .harness/ project
 harness-gui /path/to/proj   # or point it at a project root
 ```
 
-Like `watch`, it never owns run state — it reads the loop's files on a timer and,
-when you press Start, shells out to the `harness` CLI. It resolves the CLI as
+Like `watch`, it never owns run state — it reads the loop's files on a timer and
+drives runs/sync by shelling out to the `harness` CLI. It resolves the CLI as
 `$HARNESS_BIN`, else a `harness` binary next to `harness-gui`, else `harness` on
 `PATH`.
 
-It shows:
+**Trace mode** (default) — a left-to-right **Requirements → Design → Tasks →
+Code** view of one spec, centered on the spec↔code sync boundary the manifest
+tracks. Because harness is spec-as-source, sync is directional (`SPEC ──▶ CODE`):
 
-- **Header** — run status (`RUNNING` / `IDLE` / `COMPLETE` / `STOPPED`), active
-  spec, iteration vs. budget, elapsed time, and the phase sequence. "Running" is
-  inferred from an in-progress task or a recent write to the log files.
-- **Progress gauge** — done / active / todo / blocked counts as a bar.
-- **Task table** — every task across all in-scope specs, in-progress first, with
-  status, attempts, and per-task phase progress. Select with `↑/↓` (or `j/k`).
-- **Task detail** — for the selected task: requirements/deps, phase checklist,
-  the latest iteration's agent exit and per-hook pass/fail + timings, the commit
-  sha, and the last failure note.
-- **Progress log** — the tail of `progress.md`, colorized by outcome.
+- **Traceability** — selecting a requirement, task, or code file highlights
+  everything linked to it across the other columns (req ↔ task via
+  `task.requirements`; task ↔ file via `files_hint`). Requirements with no
+  covering task are flagged.
+- **Generation progress** — done/total tasks for the spec (validated code-gen).
+- **Sync gutter** — `in sync` / `stale` (spec edited since baseline) / `drift`
+  (owned file changed out-of-band) / `unrecorded`, with per-file drift markers in
+  the Code column.
+- **Sync actions** — *Check* (report drift), *Build* (make code conform to the
+  spec), *Rebuild* (destructive re-render, with confirmation), *Accept baseline*
+  (record current state). The reverse direction (code → spec) is intentionally
+  not a button — drift is surfaced and resolved by reverting or re-baselining.
 
-Keys: `↑/↓` select · `g/G` jump to top/bottom · `r` force refresh · `q` quit.
-The view auto-refreshes ~every 0.4s.
+**Run mode** — the live loop dashboard: run status (`RUNNING` / `IDLE` /
+`COMPLETE` / `BLOCKED`), a done/active/todo/blocked gauge, the task table
+(in-progress first, with attempts and phase progress), a task-detail pane (latest
+iteration's agent exit, per-hook pass/fail + timings, commit sha, last failure),
+colorized `progress.md` tail, live agent output, a per-task phase grid, and
+**Start/Stop** controls that launch `harness build` with options. Both modes
+auto-refresh ~every 0.4s.
+
+The terminal `harness watch` dashboard remains for headless/SSH use; its keys are
+`↑/↓` select · `g/G` jump to top/bottom · `r` force refresh · `q` quit.
 
 ## Hook contract
 

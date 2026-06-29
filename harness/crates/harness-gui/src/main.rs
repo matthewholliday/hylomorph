@@ -1,14 +1,21 @@
-//! `harness-gui` — a desktop dashboard for a Harness Ralph-loop run.
+//! `harness-gui` — a desktop front-end for a Harness project.
 //!
-//! It renders the same on-disk state model the terminal `harness watch` view
-//! uses (via [`harness_core::snapshot::Snapshot`]), and adds what a terminal
-//! can't do well: launching/stopping a run, streaming live agent output, and
-//! browsing specs and per-task phase progress.
+//! Two top-level modes share the same on-disk read model:
 //!
-//! State is read from disk on a timer; runs are driven by shelling out to the
-//! `harness` CLI. The GUI never owns run state — disk is the source of truth.
+//! * **Run** — the live loop dashboard (status, task list, progress, live agent
+//!   output, Start/Stop controls), rendered from
+//!   [`harness_core::snapshot::Snapshot`].
+//! * **Trace** — a left-to-right **Requirements → Design → Tasks → Code** view
+//!   of one spec, showing traceability links, generation progress, and the
+//!   spec↔code sync/drift state, with controls to drive forward sync
+//!   ([`harness_core::trace::SpecTrace`]).
+//!
+//! State is read from disk on a timer; runs and sync actions are driven by
+//! shelling out to the `harness` CLI. The GUI never owns run state — disk is the
+//! source of truth.
 
 mod runner;
+mod trace_view;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -19,19 +26,20 @@ use egui::{Color32, RichText};
 
 use harness_core::snapshot::Snapshot;
 use harness_core::spec::{load_requirements, spec_dir, RequirementsFile, Task, TaskStatus};
+use harness_core::trace::SpecTrace;
 
 use runner::{RunHandle, RunOptions};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
 
 // ── colours ─────────────────────────────────────────────────────────────────
-const ACCENT: Color32 = Color32::from_rgb(86, 182, 194);
-const OK: Color32 = Color32::from_rgb(126, 192, 80);
-const FAIL: Color32 = Color32::from_rgb(224, 108, 117);
-const WARN: Color32 = Color32::from_rgb(229, 192, 123);
-const DIM: Color32 = Color32::from_rgb(130, 137, 151);
+pub const ACCENT: Color32 = Color32::from_rgb(86, 182, 194);
+pub const OK: Color32 = Color32::from_rgb(126, 192, 80);
+pub const FAIL: Color32 = Color32::from_rgb(224, 108, 117);
+pub const WARN: Color32 = Color32::from_rgb(229, 192, 123);
+pub const DIM: Color32 = Color32::from_rgb(130, 137, 151);
 
-fn status_color(s: &TaskStatus) -> Color32 {
+pub fn status_color(s: &TaskStatus) -> Color32 {
     match s {
         TaskStatus::Done => OK,
         TaskStatus::InProgress => ACCENT,
@@ -40,13 +48,19 @@ fn status_color(s: &TaskStatus) -> Color32 {
     }
 }
 
-fn status_glyph(s: &TaskStatus) -> &'static str {
+pub fn status_glyph(s: &TaskStatus) -> &'static str {
     match s {
         TaskStatus::Done => "✓",
         TaskStatus::InProgress => "▶",
         TaskStatus::Blocked => "✗",
         TaskStatus::Todo => "·",
     }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Mode {
+    Run,
+    Trace,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -57,7 +71,17 @@ enum Tab {
     Phases,
 }
 
-/// Cached spec text so we don't re-read files every frame.
+/// What's selected in Trace mode; drives cross-column highlighting.
+#[derive(Clone, PartialEq, Default)]
+pub enum Selection {
+    #[default]
+    None,
+    Requirement(String),
+    Task(String),
+    File(String),
+}
+
+/// Cached spec text for the Run-mode Spec tab.
 struct SpecView {
     spec: String,
     requirements: Option<RequirementsFile>,
@@ -66,18 +90,26 @@ struct SpecView {
 
 struct HarnessApp {
     root: PathBuf,
+    mode: Mode,
     snap: Snapshot,
     last_poll: Instant,
+
+    // run mode
     selected_id: Option<String>,
     tab: Tab,
-
-    // run controls + live output
-    run: Option<RunHandle>,
     opts: RunOptions,
+    spec_cache: Option<SpecView>,
+
+    // shared job (run loop or a sync action) + its streamed output
+    run: Option<RunHandle>,
     log: Vec<String>,
     last_exit: Option<i32>,
 
-    spec_cache: Option<SpecView>,
+    // trace mode
+    trace: Option<SpecTrace>,
+    trace_spec: Option<String>,
+    selection: Selection,
+    confirm_rebuild: bool,
 }
 
 impl HarnessApp {
@@ -91,21 +123,25 @@ impl HarnessApp {
             .map(|t| t.id.clone());
         HarnessApp {
             root,
+            mode: Mode::Trace,
             snap,
             last_poll: Instant::now(),
             selected_id,
             tab: Tab::Detail,
-            run: None,
             opts: RunOptions::default(),
+            spec_cache: None,
+            run: None,
             log: Vec::new(),
             last_exit: None,
-            spec_cache: None,
+            trace: None,
+            trace_spec: None,
+            selection: Selection::None,
+            confirm_rebuild: false,
         }
     }
 
     fn refresh(&mut self) {
         self.snap = Snapshot::load(&self.root);
-        // Keep selection valid; default to the active task if it vanished.
         let still_present = self
             .selected_id
             .as_ref()
@@ -121,6 +157,9 @@ impl HarnessApp {
                 .map(|t| t.id.clone());
         }
         self.last_poll = Instant::now();
+        if self.trace.is_some() {
+            self.reload_trace();
+        }
     }
 
     fn selected_task(&self) -> Option<&Task> {
@@ -128,12 +167,117 @@ impl HarnessApp {
         self.snap.tasks.iter().find(|t| &t.id == id)
     }
 
-    /// Best guess at the spec currently in focus.
     fn active_spec(&self) -> Option<String> {
         self.selected_task()
             .map(|t| t.spec.clone())
             .or_else(|| self.snap.state.active_spec.clone())
             .or_else(|| self.snap.tasks.first().map(|t| t.spec.clone()))
+    }
+
+    // ── trace model ──────────────────────────────────────────────────────────
+
+    fn specs(&self) -> Vec<String> {
+        harness_core::spec::list_specs(&self.root).unwrap_or_default()
+    }
+
+    /// Pick a spec to trace if none is chosen, and load it if needed.
+    fn ensure_trace(&mut self) {
+        let specs = self.specs();
+        let valid = self
+            .trace_spec
+            .as_ref()
+            .map(|s| specs.contains(s))
+            .unwrap_or(false);
+        if !valid {
+            self.trace_spec = self
+                .snap
+                .state
+                .active_spec
+                .clone()
+                .filter(|s| specs.contains(s))
+                .or_else(|| specs.first().cloned());
+            self.trace = None;
+        }
+        let need = match (&self.trace, &self.trace_spec) {
+            (Some(t), Some(s)) => &t.name != s,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if need {
+            self.reload_trace();
+        }
+    }
+
+    fn reload_trace(&mut self) {
+        if let Some(s) = self.trace_spec.clone() {
+            self.trace = SpecTrace::load(&self.root, &s).ok();
+        }
+    }
+
+    // ── job control ──────────────────────────────────────────────────────────
+
+    fn is_running(&self) -> bool {
+        self.run.as_ref().map(|r| r.is_running()).unwrap_or(false)
+    }
+
+    /// Launch `harness <args...>`, streaming output into the shared log.
+    fn launch(&mut self, args: Vec<String>) {
+        if self.is_running() {
+            return;
+        }
+        self.log.clear();
+        self.last_exit = None;
+        match RunHandle::spawn_args(&self.root, &args) {
+            Ok(h) => {
+                self.log.push(format!("$ harness {}", args.join(" ")));
+                self.run = Some(h);
+            }
+            Err(e) => self.log.push(format!("failed to launch: {e}")),
+        }
+    }
+
+    fn start_run(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        self.log.clear();
+        self.last_exit = None;
+        match RunHandle::spawn(&self.root, &self.opts) {
+            Ok(h) => {
+                self.log
+                    .push(format!("$ harness build  ({})", self.root.display()));
+                self.run = Some(h);
+                self.tab = Tab::Output;
+            }
+            Err(e) => self.log.push(format!("failed to launch: {e}")),
+        }
+    }
+
+    fn stop_run(&mut self) {
+        if let Some(h) = self.run.as_mut() {
+            h.stop();
+            self.log.push("— stopped —".to_string());
+        }
+    }
+
+    /// Pull any new output and, when the job finishes, reap it and refresh state
+    /// so completed work shows up in both modes.
+    fn pump_run(&mut self) {
+        let mut finished_code = None;
+        if let Some(h) = self.run.as_mut() {
+            let lines = h.poll();
+            self.log.extend(lines);
+            if !h.is_running() {
+                finished_code = Some(h.exit_code());
+            }
+        }
+        if let Some(code) = finished_code {
+            self.last_exit = code;
+            self.log
+                .push(format!("— exited (code {}) —", code.unwrap_or(-1)));
+            self.run = None;
+            self.refresh();
+        }
     }
 
     fn ensure_spec_cache(&mut self, spec: &str) {
@@ -154,57 +298,9 @@ impl HarnessApp {
             design,
         });
     }
-
-    fn start_run(&mut self) {
-        if self.run.as_ref().map(|r| r.is_running()).unwrap_or(false) {
-            return;
-        }
-        self.log.clear();
-        self.last_exit = None;
-        match RunHandle::spawn(&self.root, &self.opts) {
-            Ok(h) => {
-                self.log
-                    .push(format!("$ harness build  ({})", self.root.display()));
-                self.run = Some(h);
-                self.tab = Tab::Output;
-            }
-            Err(e) => {
-                self.log.push(format!("failed to launch: {e}"));
-            }
-        }
-    }
-
-    fn stop_run(&mut self) {
-        if let Some(h) = self.run.as_mut() {
-            h.stop();
-            self.log.push("— stopped —".to_string());
-        }
-    }
-
-    /// Pull any new output and reap the child when it finishes.
-    fn pump_run(&mut self) {
-        let mut finished_code = None;
-        if let Some(h) = self.run.as_mut() {
-            let lines = h.poll();
-            self.log.extend(lines);
-            if !h.is_running() {
-                finished_code = Some(h.exit_code());
-            }
-        }
-        if let Some(code) = finished_code {
-            self.last_exit = code;
-            self.log
-                .push(format!("— exited (code {}) —", code.unwrap_or(-1)));
-            self.run = None;
-        }
-    }
-
-    fn is_running(&self) -> bool {
-        self.run.as_ref().map(|r| r.is_running()).unwrap_or(false)
-    }
 }
 
-// ── header ────────────────────────────────────────────────────────────────
+// ── header helpers (run mode) ────────────────────────────────────────────────
 
 struct Status {
     label: &'static str,
@@ -250,7 +346,6 @@ fn elapsed_str(app: &HarnessApp) -> String {
 
 impl eframe::App for HarnessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Stream child output every frame; reload disk state on the poll timer.
         self.pump_run();
         if self.last_poll.elapsed() >= POLL_INTERVAL {
             self.refresh();
@@ -261,14 +356,36 @@ impl eframe::App for HarnessApp {
             POLL_INTERVAL
         });
 
-        self.header(ctx);
-        self.task_list(ctx);
-        self.progress_log(ctx);
-        self.central(ctx);
+        self.mode_bar(ctx);
+        match self.mode {
+            Mode::Run => {
+                self.header(ctx);
+                self.task_list(ctx);
+                self.progress_log(ctx);
+                self.central(ctx);
+            }
+            Mode::Trace => trace_view::ui(self, ctx),
+        }
     }
 }
 
 impl HarnessApp {
+    fn mode_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("mode-bar").show(ctx, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new("Harness").color(ACCENT));
+                ui.separator();
+                ui.selectable_value(&mut self.mode, Mode::Trace, "Trace");
+                ui.selectable_value(&mut self.mode, Mode::Run, "Run");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(self.root.display().to_string()).color(DIM));
+                });
+            });
+            ui.add_space(2.0);
+        });
+    }
+
     fn header(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(4.0);
@@ -305,7 +422,6 @@ impl HarnessApp {
             });
 
             ui.add_space(4.0);
-            // Stats bar.
             let c = &self.snap.counts;
             ui.horizontal(|ui| {
                 ui.add(
@@ -321,7 +437,6 @@ impl HarnessApp {
             });
 
             ui.add_space(4.0);
-            // Run controls.
             ui.horizontal(|ui| {
                 let running = self.is_running();
                 if running {
@@ -367,8 +482,6 @@ impl HarnessApp {
                 ui.label(RichText::new("TASKS").color(DIM).strong());
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    // Clone the minimal data we need so we don't borrow self.snap
-                    // while mutating self.selected_id.
                     let rows: Vec<(String, String, TaskStatus, u32, usize, usize)> = self
                         .snap
                         .tasks
@@ -624,7 +737,7 @@ impl HarnessApp {
     }
 }
 
-fn progress_color(line: &str) -> Color32 {
+pub fn progress_color(line: &str) -> Color32 {
     let l = line.to_ascii_lowercase();
     if l.contains("done") || l.contains('✓') {
         OK
@@ -638,7 +751,6 @@ fn progress_color(line: &str) -> Color32 {
 }
 
 fn resolve_root() -> PathBuf {
-    // Optional positional arg: a project root. Otherwise search upward like the CLI.
     if let Some(arg) = std::env::args().nth(1) {
         return PathBuf::from(arg);
     }
@@ -650,7 +762,7 @@ fn main() -> eframe::Result<()> {
     let root = resolve_root();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 760.0])
+            .with_inner_size([1280.0, 800.0])
             .with_title("Harness"),
         ..Default::default()
     };
