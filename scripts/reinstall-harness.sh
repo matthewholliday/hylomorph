@@ -23,7 +23,7 @@ if [ ! -f "$HARNESS_DIR/Cargo.toml" ]; then
 fi
 
 echo "Building and installing harness from $HARNESS_DIR ..."
-cargo install --path "$HARNESS_DIR" --locked --force
+cargo install --path "$HARNESS_DIR/crates/harness-cli" --locked --force
 
 echo
 echo "Installed: $(command -v harness)"
