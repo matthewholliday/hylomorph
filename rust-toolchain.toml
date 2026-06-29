@@ -1,0 +1,8 @@
+# Pin the toolchain so builds, lints, and `cargo fmt` are reproducible across
+# contributor machines and CI. Bumping the Rust version is a deliberate change:
+# update `channel` here AND the `dtolnay/rust-toolchain@<version>` refs in
+# .github/workflows/{ci,release}.yml in the same PR.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

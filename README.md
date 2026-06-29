@@ -11,9 +11,15 @@ drives a fresh-context agent over the task list one task at a time and decides
 
 ## Build
 
+The CLI lives in the Cargo workspace under `harness/`.
+
 ```sh
+cd harness
 cargo build --release
-# binary at target/release/harness
+# binary at harness/target/release/harness
+
+# …or build + install `harness` (and the optional `harness-gui`) onto your PATH:
+../scripts/build-and-reinstall.sh
 ```
 
 ## Quick start
@@ -301,7 +307,11 @@ done on the agent's say-so.
 
 ## Status
 
-v0.1. Implemented: the full loop, gates, the gated five-layer pipeline
+v0.1 — **pre-1.0**. The CLI surface and on-disk formats (`.specs/`, `.harness/`,
+the JSON/JSONL layer schemas) are not yet stable and may change between 0.x
+releases; pin a version if you script against them.
+
+Implemented: the full loop, gates, the gated five-layer pipeline
 (requirements → design → tasks → code → evals) with per-layer write scoping,
 drift detection (`check`), burn-and-rebuild (`rebuild`), evals, logging, and all
 CLI commands above. Not yet implemented: full deterministic task regeneration

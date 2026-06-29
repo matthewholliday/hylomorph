@@ -1671,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "harness-cli"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "harness-core"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1699,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "harness-gui"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",

@@ -7,7 +7,9 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+# Pre-1.0: the CLI surface and on-disk formats (.specs/, .harness/, the JSON/JSONL
+# layer schemas) are not yet stable and may change between 0.x releases.
+version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
