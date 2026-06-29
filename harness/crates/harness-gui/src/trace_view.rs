@@ -1,4 +1,9 @@
-//! Trace mode: the **Requirements → Design → Tasks → Code** view of one spec.
+//! Trace mode: a two-column **Spec ⟷ Code** view of one spec.
+//!
+//! The manifest tracks a single boundary: the spec inputs *as one unit*
+//! (requirements + design + tasks, combined into one hash) versus the owned code
+//! (hashed per file). So the layout is two columns — the spec stacked on the
+//! left, code on the right — not a four-stage pipeline.
 //!
 //! Spec-as-source means sync is directional: spec → code (forward) is driven by
 //! `build`/`rebuild`; the reverse is only *detected* as drift and resolved by
@@ -292,18 +297,27 @@ fn action_log(app: &mut HarnessApp, ui: &mut egui::Ui) {
         });
 }
 
+/// Two columns: the spec as one unit (requirements + design + tasks stacked) on
+/// the left, the owned code on the right — matching the single hash boundary the
+/// manifest actually tracks (combined spec inputs ⟷ per-file code).
 fn columns(app: &mut HarnessApp, ui: &mut egui::Ui, t: &SpecTrace) {
     let hi = compute_hi(t, &app.selection);
     let has_sel = app.selection != Selection::None;
 
-    ui.columns(4, |cols| {
-        // ── Requirements ──────────────────────────────────────────────────
-        cols[0].push_id("col-req", |ui| {
-            ui.label(RichText::new("REQUIREMENTS").color(DIM).strong());
+    ui.columns(2, |cols| {
+        // ── Spec (requirements + design + tasks) ───────────────────────────
+        cols[0].push_id("col-spec", |ui| {
+            ui.label(
+                RichText::new("SPEC  (requirements + design + tasks)")
+                    .color(DIM)
+                    .strong(),
+            );
             ui.separator();
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    // Requirements.
+                    ui.label(RichText::new("Requirements").color(ACCENT).strong());
                     if t.requirements.is_empty() {
                         ui.label(RichText::new("no 1-requirements.json").color(DIM));
                     }
@@ -314,7 +328,7 @@ fn columns(app: &mut HarnessApp, ui: &mut egui::Ui, t: &SpecTrace) {
                             .clone()
                             .or_else(|| r.response.clone())
                             .unwrap_or_default();
-                        let mut label = format!("{}  {}", r.id, text);
+                        let mut label = format!("• {}  {}", r.id, text);
                         if !covered {
                             label.push_str("  ⚠ no task");
                         }
@@ -330,16 +344,11 @@ fn columns(app: &mut HarnessApp, ui: &mut egui::Ui, t: &SpecTrace) {
                             };
                         }
                     }
-                });
-        });
 
-        // ── Design ────────────────────────────────────────────────────────
-        cols[1].push_id("col-design", |ui| {
-            ui.label(RichText::new("DESIGN").color(DIM).strong());
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    // Design.
+                    ui.label(RichText::new("Design").color(ACCENT).strong());
                     if t.design.is_empty() {
                         ui.label(RichText::new("no 2-design.md").color(DIM));
                     }
@@ -356,16 +365,11 @@ fn columns(app: &mut HarnessApp, ui: &mut egui::Ui, t: &SpecTrace) {
                         };
                         ui.label(RichText::new(line).color(color).monospace());
                     }
-                });
-        });
 
-        // ── Tasks ─────────────────────────────────────────────────────────
-        cols[2].push_id("col-tasks", |ui| {
-            ui.label(RichText::new("TASKS").color(DIM).strong());
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    // Tasks.
+                    ui.label(RichText::new("Tasks").color(ACCENT).strong());
                     if t.tasks.is_empty() {
                         ui.label(RichText::new("no 3-tasks.jsonl").color(DIM));
                     }
@@ -401,9 +405,9 @@ fn columns(app: &mut HarnessApp, ui: &mut egui::Ui, t: &SpecTrace) {
                 });
         });
 
-        // ── Code ──────────────────────────────────────────────────────────
-        cols[3].push_id("col-code", |ui| {
-            ui.label(RichText::new("CODE (owned files)").color(DIM).strong());
+        // ── Code ───────────────────────────────────────────────────────────
+        cols[1].push_id("col-code", |ui| {
+            ui.label(RichText::new("CODE  (owned files)").color(DIM).strong());
             ui.separator();
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])

@@ -157,14 +157,16 @@ drives runs/sync by shelling out to the `harness` CLI. It resolves the CLI as
 `$HARNESS_BIN`, else a `harness` binary next to `harness-gui`, else `harness` on
 `PATH`.
 
-**Trace mode** (default) — a left-to-right **Requirements → Design → Tasks →
-Code** view of one spec, centered on the spec↔code sync boundary the manifest
-tracks. Because harness is spec-as-source, sync is directional (`SPEC ──▶ CODE`):
+**Trace mode** (default) — a two-column **Spec ⟷ Code** view of one spec. This
+mirrors the single boundary the manifest actually tracks: the spec inputs *as one
+unit* (requirements + design + tasks, combined into one hash) versus the owned
+code (hashed per file). The left column stacks Requirements, Design, and Tasks;
+the right column lists the owned code files. Because harness is spec-as-source,
+sync is directional (`SPEC ──▶ CODE`):
 
 - **Traceability** — selecting a requirement, task, or code file highlights
-  everything linked to it across the other columns (req ↔ task via
-  `task.requirements`; task ↔ file via `files_hint`). Requirements with no
-  covering task are flagged.
+  everything linked to it (req ↔ task via `task.requirements`; task ↔ file via
+  `files_hint`). Requirements with no covering task are flagged.
 - **Generation progress** — done/total tasks for the spec (validated code-gen).
 - **Sync gutter** — `in sync` / `stale` (spec edited since baseline) / `drift`
   (owned file changed out-of-band) / `unrecorded`, with per-file drift markers in
