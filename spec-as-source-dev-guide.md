@@ -197,6 +197,8 @@ harness check tido
 
 Maya writes the missing eval and the spec checks clean. Now the evals are the oracle. They define what "correct" means, independently of how the code is structured.
 
+She didn't have to start from a blank file, though. `harness eval draft tido` turns each requirement's `acceptance_criteria` into a stub script under `evals/tido/` — one per requirement, named after its ID. To keep the oracle independent of whatever wrote the code, the draft is produced by the configured *reviewer* model rather than the code agent (pass `--use-code-agent` to override, or set `agent.reviewer_command` to get a genuinely independent one). Crucially the stubs are **drafts, not truth**: each one is hermetic scaffolding with `# TODO`s where the model couldn't ground a detail without reading the implementation, and each `exit 1`s until a human replaces those TODOs with real behaviour-level assertions. So the draft removes the blank-page work without letting a machine-guessed oracle quietly pass — Maya still reads every stub and makes it real.
+
 ---
 
 ## Phase 3: The spec changes — regenerate, don't patch
@@ -359,6 +361,7 @@ That's it. Everything else — pace layers, determinism probes, round-trip sync 
 | `harness rebuild <name> --only "src/storage/**"` | Rebuild a subset of owned files |
 | `harness check <name> --determinism` | Determinism probe (rebuild twice) |
 | `harness check <name> --reverse` | Reconstruct spec from code, emit convergence verdict |
+| `harness eval draft <name>` | Draft reviewable eval stubs from acceptance criteria (independent reviewer model) |
 | `harness eval run <name>` | Run the oracle against current code |
 | `harness gate check` | Verify every referenced gate exists and is executable |
 | `harness explain <task>` | Preview the exact prompt the agent would receive (no run) |

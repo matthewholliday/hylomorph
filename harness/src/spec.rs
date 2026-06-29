@@ -141,8 +141,8 @@ pub fn list_specs(root: &Path) -> Result<Vec<String>> {
 
 pub fn load_tasks(spec_dir: &Path) -> Result<Vec<Task>> {
     let path = spec_dir.join("3-tasks.jsonl");
-    let file = std::fs::File::open(&path)
-        .with_context(|| format!("opening tasks file {:?}", path))?;
+    let file =
+        std::fs::File::open(&path).with_context(|| format!("opening tasks file {:?}", path))?;
     let reader = std::io::BufReader::new(file);
     let mut tasks = Vec::new();
     for (i, line) in reader.lines().enumerate() {
@@ -162,8 +162,8 @@ pub fn save_tasks(spec_dir: &Path, tasks: &[Task]) -> Result<()> {
     let path = spec_dir.join("3-tasks.jsonl");
     let mut buf = String::new();
     for task in tasks {
-        let line = serde_json::to_string(task)
-            .with_context(|| format!("serializing task {}", task.id))?;
+        let line =
+            serde_json::to_string(task).with_context(|| format!("serializing task {}", task.id))?;
         buf.push_str(&line);
         buf.push('\n');
     }
@@ -196,7 +196,10 @@ pub fn select_next_task(tasks: &[Task]) -> Option<usize> {
         if !matches!(task.status, TaskStatus::Todo) {
             continue;
         }
-        let deps_satisfied = task.depends_on.iter().all(|dep| done_ids.contains(dep.as_str()));
+        let deps_satisfied = task
+            .depends_on
+            .iter()
+            .all(|dep| done_ids.contains(dep.as_str()));
         if !deps_satisfied {
             continue;
         }

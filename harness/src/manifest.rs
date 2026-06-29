@@ -65,8 +65,8 @@ fn hash_bytes(bytes: &[u8]) -> String {
 }
 
 fn hash_file(path: &Path) -> Result<String> {
-    let content = std::fs::read(path)
-        .with_context(|| format!("reading {} for hashing", path.display()))?;
+    let content =
+        std::fs::read(path).with_context(|| format!("reading {} for hashing", path.display()))?;
     Ok(hash_bytes(&content))
 }
 
@@ -77,8 +77,7 @@ pub fn compute_spec_inputs_hash(spec_dir_path: &Path) -> Result<String> {
         let p = spec_dir_path.join(name);
         if p.exists() {
             combined.push_str(
-                &std::fs::read_to_string(&p)
-                    .with_context(|| format!("reading {}", p.display()))?,
+                &std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?,
             );
         }
     }
@@ -141,7 +140,10 @@ pub fn record_spec(root: &Path, spec_name: &str) -> Result<()> {
     let mut manifest = load_manifest(root)?;
     manifest.specs.insert(
         spec_name.to_string(),
-        SpecManifestEntry { spec_inputs_hash, owned_files },
+        SpecManifestEntry {
+            spec_inputs_hash,
+            owned_files,
+        },
     );
     save_manifest(root, &manifest)?;
     Ok(())
@@ -180,7 +182,9 @@ pub fn check_spec(root: &Path, spec_name: &str) -> Result<CheckResult> {
     let Some(entry) = manifest.specs.get(spec_name) else {
         return Ok(CheckResult {
             spec: spec_name.to_string(),
-            drifts: vec![DriftKind::Unrecorded { spec_name: spec_name.to_string() }],
+            drifts: vec![DriftKind::Unrecorded {
+                spec_name: spec_name.to_string(),
+            }],
         });
     };
 
@@ -190,20 +194,29 @@ pub fn check_spec(root: &Path, spec_name: &str) -> Result<CheckResult> {
     let mut drifts = Vec::new();
 
     if current_hash != entry.spec_inputs_hash {
-        drifts.push(DriftKind::StaleCode { spec_name: spec_name.to_string() });
+        drifts.push(DriftKind::StaleCode {
+            spec_name: spec_name.to_string(),
+        });
     }
 
     for (rel_path, recorded_hash) in &entry.owned_files {
         let abs = root.join(rel_path);
         if !abs.exists() {
-            drifts.push(DriftKind::Missing { path: rel_path.clone() });
+            drifts.push(DriftKind::Missing {
+                path: rel_path.clone(),
+            });
         } else {
             let current = hash_file(&abs)?;
             if current != *recorded_hash {
-                drifts.push(DriftKind::CodeDrift { path: rel_path.clone() });
+                drifts.push(DriftKind::CodeDrift {
+                    path: rel_path.clone(),
+                });
             }
         }
     }
 
-    Ok(CheckResult { spec: spec_name.to_string(), drifts })
+    Ok(CheckResult {
+        spec: spec_name.to_string(),
+        drifts,
+    })
 }

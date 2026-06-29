@@ -13,7 +13,9 @@ use crate::hooks::{
 };
 use crate::manifest::record_spec;
 use crate::prompt::{compose_prompt, write_prompt_file};
-use crate::spec::{list_specs, load_requirements, load_tasks, save_tasks, spec_dir, Task, TaskStatus};
+use crate::spec::{
+    list_specs, load_requirements, load_tasks, save_tasks, spec_dir, Task, TaskStatus,
+};
 use crate::state::{
     append_progress, load_state, prune_iteration_logs, save_iteration_record, save_state,
     HookResult, IterationRecord,
@@ -40,9 +42,8 @@ fn build_globset(patterns: &[String]) -> Option<GlobSet> {
     }
     let mut builder = GlobSetBuilder::new();
     for pat in patterns {
-        match GlobBuilder::new(pat).build() {
-            Ok(g) => { builder.add(g); }
-            Err(_) => {}
+        if let Ok(g) = GlobBuilder::new(pat).build() {
+            builder.add(g);
         }
     }
     builder.build().ok()
@@ -91,8 +92,8 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
     let mut tasks_by_spec: Vec<(String, Vec<Task>)> = Vec::new();
     for name in &scope {
         let dir = spec_dir(root, name);
-        let tasks = load_tasks(&dir)
-            .with_context(|| format!("failed to load tasks for spec '{name}'"))?;
+        let tasks =
+            load_tasks(&dir).with_context(|| format!("failed to load tasks for spec '{name}'"))?;
         tasks_by_spec.push((name.clone(), tasks));
     }
 
@@ -189,7 +190,12 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
                 .filter(|t| t.status == TaskStatus::Blocked)
                 .count();
             let (done, total) = count_done_total(&tasks_by_spec);
-            print_summary(done, blocked, total - done - blocked, wall_start.elapsed().as_secs());
+            print_summary(
+                done,
+                blocked,
+                total - done - blocked,
+                wall_start.elapsed().as_secs(),
+            );
             persist_all(root, &tasks_by_spec, &mut state)?;
             return Ok(if blocked > 0 { 2 } else { 0 });
         };
@@ -241,7 +247,15 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
         // Compose + write prompt.
         let is_first = state.iteration_count == 0;
         let phase_template = phase_cfg.and_then(|pc| pc.prompt_template.as_deref());
-        let prompt = compose_prompt(root, &config, &task, &spec_name, is_first, current_phase.as_deref(), phase_template)?;
+        let prompt = compose_prompt(
+            root,
+            &config,
+            &task,
+            &spec_name,
+            is_first,
+            current_phase.as_deref(),
+            phase_template,
+        )?;
         let (prompt_file, prompt_hash) = write_prompt_file(&prompt)?;
 
         // Build and run the agent command (fresh process).
@@ -279,11 +293,16 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
             agent_failure = true;
         } else {
             // Guard: reject writes to protected paths and [writes].deny patterns.
-            let violations = check_protected_writes(root, deny_set.as_ref(), protected_extra.as_ref());
+            let violations =
+                check_protected_writes(root, deny_set.as_ref(), protected_extra.as_ref());
             if !violations.is_empty() {
                 eprintln!(
                     "error: agent wrote to protected path(s) — failing iteration:\n{}",
-                    violations.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n")
+                    violations
+                        .iter()
+                        .map(|p| format!("  {p}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 );
                 all_blocking_passed = false;
             }
@@ -292,7 +311,8 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
             // If the task declares files_hint AND enforce_ownership is on, any
             // changed file outside files_hint ∪ allow patterns fails the iteration.
             if all_blocking_passed && guardrails.enforce_ownership && !task.files_hint.is_empty() {
-                let ownership_violations = check_ownership_writes(root, &task.files_hint, allow_set.as_ref());
+                let ownership_violations =
+                    check_ownership_writes(root, &task.files_hint, allow_set.as_ref());
                 if !ownership_violations.is_empty() {
                     eprintln!(
                         "error: agent wrote outside task ownership boundary — failing iteration:\n{}",
@@ -335,8 +355,7 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
                         let log_path = save_hook_log(root, hook_name, &inv, &outcome)
                             .unwrap_or_else(|_| String::new());
                         let passed = outcome.exit_code == 0 && !outcome.timed_out;
-                        let combined =
-                            format!("{}\n{}", outcome.stdout, outcome.stderr);
+                        let combined = format!("{}\n{}", outcome.stdout, outcome.stderr);
                         hook_results.push(HookResult {
                             name: hook_name.clone(),
                             exit_code: outcome.exit_code,
@@ -408,7 +427,9 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
                     root,
                     &format!(
                         "- [{}] iter {iter}: task {} phase '{}' DONE — advancing",
-                        now(), task.id, phase_label
+                        now(),
+                        task.id,
+                        phase_label
                     ),
                 )?;
             } else {
@@ -430,7 +451,12 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
                 }
                 append_progress(
                     root,
-                    &format!("- [{}] iter {iter}: task {} DONE — {}", now(), task.id, task.title),
+                    &format!(
+                        "- [{}] iter {iter}: task {} DONE — {}",
+                        now(),
+                        task.id,
+                        task.title
+                    ),
                 )?;
             }
         } else {
@@ -448,7 +474,10 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
 
             let task_mut = &mut tasks_by_spec[spec_vec_idx].1[entry.idx];
             task_mut.attempts += 1;
-            let phase_label = current_phase.as_deref().map(|p| format!(" (phase '{p}')")).unwrap_or_default();
+            let phase_label = current_phase
+                .as_deref()
+                .map(|p| format!(" (phase '{p}')"))
+                .unwrap_or_default();
             let summary = if agent_exit != 0 {
                 format!("agent exited {agent_exit}{phase_label}")
             } else {
@@ -505,7 +534,11 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
                     "- [{}] iter {iter}: task {} {} — {}",
                     now(),
                     task.id,
-                    if final_status == TaskStatus::Blocked { "BLOCKED" } else { "retry" },
+                    if final_status == TaskStatus::Blocked {
+                        "BLOCKED"
+                    } else {
+                        "retry"
+                    },
                     summary
                 ),
             )?;
@@ -554,7 +587,12 @@ pub fn run(root: &Path, opts: RunOptions) -> Result<i32> {
         .flat_map(|(_, ts)| ts.iter())
         .filter(|t| t.status == TaskStatus::Blocked)
         .count();
-    print_summary(done, blocked, total - done - blocked, wall_start.elapsed().as_secs());
+    print_summary(
+        done,
+        blocked,
+        total - done - blocked,
+        wall_start.elapsed().as_secs(),
+    );
 
     if agent_failure && opts.once {
         return Ok(3);

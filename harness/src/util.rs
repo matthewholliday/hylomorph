@@ -17,8 +17,7 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| Path::new(".").to_path_buf());
-    std::fs::create_dir_all(&parent)
-        .with_context(|| format!("creating directory {:?}", parent))?;
+    std::fs::create_dir_all(&parent).with_context(|| format!("creating directory {:?}", parent))?;
 
     // Temp file in the same directory so rename() stays on one filesystem.
     let file_name = path
@@ -29,8 +28,8 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
 
     {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)
-            .with_context(|| format!("creating temp file {:?}", tmp))?;
+        let mut f =
+            std::fs::File::create(&tmp).with_context(|| format!("creating temp file {:?}", tmp))?;
         f.write_all(contents)
             .with_context(|| format!("writing temp file {:?}", tmp))?;
         f.sync_all()

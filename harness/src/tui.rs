@@ -269,11 +269,7 @@ impl App {
     /// The most recent iteration record for the selected task, if any.
     fn selected_iteration(&self) -> Option<&IterationRecord> {
         let task = self.selected_task()?;
-        self.snap
-            .recent
-            .iter()
-            .rev()
-            .find(|r| r.task_id == task.id)
+        self.snap.recent.iter().rev().find(|r| r.task_id == task.id)
     }
 }
 
@@ -298,8 +294,8 @@ fn event_loop(term: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> R
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('c');
+                let ctrl_c =
+                    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c');
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     _ if ctrl_c => break,
@@ -393,7 +389,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let line = Line::from(vec![
         Span::styled(format!("{dot} "), Style::default().fg(color)),
         Span::styled(
-            format!("{label}"),
+            label.to_string(),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
         Span::styled("   spec ", Style::default().fg(DIM)),
@@ -460,7 +456,10 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 &t.phases
             };
-            let done = seq.iter().filter(|p| t.completed_phases.contains(p)).count();
+            let done = seq
+                .iter()
+                .filter(|p| t.completed_phases.contains(p))
+                .count();
             format!("{}/{}", done, seq.len())
         } else {
             "—".to_string()
@@ -468,13 +467,13 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
         Row::new(vec![
             Cell::from(Span::styled(
                 status_glyph(&t.status),
-                Style::default().fg(sc).add_modifier(
-                    if t.status == TaskStatus::InProgress {
+                Style::default()
+                    .fg(sc)
+                    .add_modifier(if t.status == TaskStatus::InProgress {
                         Modifier::BOLD
                     } else {
                         Modifier::empty()
-                    },
-                ),
+                    }),
             )),
             Cell::from(t.id.clone()),
             Cell::from(truncate(&t.title, 40)),
@@ -521,8 +520,14 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         }
         Some(t) => {
             lines.push(Line::from(vec![
-                Span::styled(format!("{} ", t.id), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled(status_glyph(&t.status), Style::default().fg(status_color(&t.status))),
+                Span::styled(
+                    format!("{} ", t.id),
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    status_glyph(&t.status),
+                    Style::default().fg(status_color(&t.status)),
+                ),
             ]));
             lines.push(Line::from(Span::styled(
                 t.title.clone(),
@@ -550,12 +555,14 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
                     .iter()
                     .flat_map(|p| {
                         let done = t.completed_phases.contains(p);
-                        vec![
-                            Span::styled(
-                                if done { format!("{p}✓ ") } else { format!("{p} ") },
-                                Style::default().fg(if done { OK } else { DIM }),
-                            ),
-                        ]
+                        vec![Span::styled(
+                            if done {
+                                format!("{p}✓ ")
+                            } else {
+                                format!("{p} ")
+                            },
+                            Style::default().fg(if done { OK } else { DIM }),
+                        )]
                     })
                     .collect();
                 let mut l = vec![Span::styled("phases ", Style::default().fg(DIM))];
@@ -579,10 +586,17 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
                         ),
                         Span::styled("agent ", Style::default().fg(DIM)),
                         Span::styled(
-                            if agent_ok { "exit 0".to_string() } else { format!("exit {}", rec.agent_exit_status) },
+                            if agent_ok {
+                                "exit 0".to_string()
+                            } else {
+                                format!("exit {}", rec.agent_exit_status)
+                            },
                             Style::default().fg(if agent_ok { OK } else { FAIL }),
                         ),
-                        Span::styled(format!("  → {}", rec.task_status_after), Style::default().fg(DIM)),
+                        Span::styled(
+                            format!("  → {}", rec.task_status_after),
+                            Style::default().fg(DIM),
+                        ),
                     ]));
                     if let Some(p) = &rec.phase {
                         lines.push(Line::from(vec![
@@ -600,7 +614,10 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
                         };
                         lines.push(Line::from(vec![
                             Span::styled(format!("  {glyph} "), Style::default().fg(col)),
-                            Span::styled(format!("{:18}", truncate(&h.name, 18)), Style::default().fg(Color::White)),
+                            Span::styled(
+                                format!("{:18}", truncate(&h.name, 18)),
+                                Style::default().fg(Color::White),
+                            ),
                             Span::styled(
                                 format!("exit {:<4} {}ms", h.exit_code, h.duration_ms),
                                 Style::default().fg(DIM),
@@ -627,7 +644,11 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
                     lines.push(Line::from(""));
                     lines.push(Line::from(Span::styled(
                         truncate(last, 80),
-                        Style::default().fg(if t.status == TaskStatus::Blocked { FAIL } else { DIM }),
+                        Style::default().fg(if t.status == TaskStatus::Blocked {
+                            FAIL
+                        } else {
+                            DIM
+                        }),
                     )));
                 }
             }
@@ -732,8 +753,8 @@ mod tests {
     /// to read, then render one frame into an off-screen buffer and assert the
     /// data made it onto the screen. Exercises load → snapshot → draw end to end.
     fn fixture_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("harness-tui-test-{}-{tag}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("harness-tui-test-{}-{tag}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let logs = dir.join(".harness").join("logs");
         std::fs::create_dir_all(logs.join("iterations")).unwrap();
@@ -817,7 +838,10 @@ mod tests {
 
         assert!(text.contains("harness"), "header title missing");
         assert!(text.contains("T-003"), "task id missing");
-        assert!(text.contains("RUNNING"), "live status missing (in_progress task present)");
+        assert!(
+            text.contains("RUNNING"),
+            "live status missing (in_progress task present)"
+        );
         assert!(text.contains("run_build"), "hook name missing from detail");
         std::fs::remove_dir_all(&root).ok();
     }

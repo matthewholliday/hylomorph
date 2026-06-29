@@ -1,0 +1,95 @@
+name: Release
+
+# Builds a macOS release binary and publishes it as a .dmg whenever changes
+# land on main (i.e. on merge). The release is tagged with the crate version
+# from harness/Cargo.toml plus the short commit SHA so every merge is unique.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  dmg:
+    name: Build & publish DMG
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: harness
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: harness
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Derive version & tag
+        id: meta
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          sha_short="${GITHUB_SHA::7}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}+${sha_short}" >> "$GITHUB_OUTPUT"
+          echo "dmg=harness-${version}-macos.dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Stage DMG contents
+        run: |
+          set -euo pipefail
+          staging="$RUNNER_TEMP/dmg-root"
+          rm -rf "$staging"
+          mkdir -p "$staging"
+          cp target/release/harness "$staging/harness"
+          chmod +x "$staging/harness"
+          cp ../LICENSE "$staging/LICENSE" 2>/dev/null || true
+          cp README.md "$staging/README.md" 2>/dev/null || cp ../README.md "$staging/README.md" 2>/dev/null || true
+          cat > "$staging/install.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # Install the harness CLI into a directory on your PATH.
+          set -euo pipefail
+          DEST="${1:-/usr/local/bin}"
+          SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/harness"
+          echo "Installing harness -> $DEST"
+          mkdir -p "$DEST"
+          install -m 0755 "$SRC" "$DEST/harness"
+          echo "Installed: $DEST/harness"
+          "$DEST/harness" --version || true
+          EOF
+          chmod +x "$staging/install.sh"
+
+      - name: Create DMG
+        run: |
+          set -euo pipefail
+          hdiutil create \
+            -volname "harness ${{ steps.meta.outputs.version }}" \
+            -srcfolder "$RUNNER_TEMP/dmg-root" \
+            -ov -format UDZO \
+            "$RUNNER_TEMP/${{ steps.meta.outputs.dmg }}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: harness ${{ steps.meta.outputs.version }}
+          body: |
+            Automated release built from `${{ github.sha }}` on merge to `main`.
+
+            **Install:** mount the `.dmg`, then run `./install.sh` (defaults to `/usr/local/bin`).
+          files: ${{ runner.temp }}/${{ steps.meta.outputs.dmg }}
+          fail_on_unpublished_files: true

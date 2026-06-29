@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 // ── PhaseConfig ───────────────────────────────────────────────────────────────
 
@@ -211,21 +211,12 @@ impl Default for BudgetsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct WritesConfig {
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default)]
     pub deny: Vec<String>,
-}
-
-impl Default for WritesConfig {
-    fn default() -> Self {
-        Self {
-            allow: Vec::new(),
-            deny: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -316,8 +307,8 @@ pub fn load_harness_config(root: &Path) -> Result<HarnessConfig> {
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
 
-    let raw: RawHarnessConfig = toml::from_str(&content)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let raw: RawHarnessConfig =
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
 
     Ok(HarnessConfig {
         agent: raw.agent.unwrap_or_default(),
@@ -341,8 +332,8 @@ pub fn load_guardrails(root: &Path) -> Result<GuardrailsConfig> {
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
 
-    let config: GuardrailsConfig = toml::from_str(&content)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let config: GuardrailsConfig =
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
 
     Ok(config)
 }

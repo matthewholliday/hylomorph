@@ -72,6 +72,7 @@ The CLI follows one grammar: top-level **verbs** for the lifecycle (`build`,
 | `harness spec tasks <name> [--fix]` | Report requirement↔task coverage; `--fix` writes task stubs. |
 | `harness eval ls <spec>` | List eval scripts for a spec. |
 | `harness eval run <spec>` | Run a spec's evals against the current code. |
+| `harness eval draft <spec> [--force] [--use-code-agent]` | Draft reviewable eval stubs from the spec's acceptance criteria. Uses the independent reviewer model by default. |
 | `harness gate ls` | List gate (validation hook) scripts. |
 | `harness gate check` | Verify every referenced gate exists and is executable (static preflight; exits 2 if broken). |
 | `harness gate run <name> [--task <id>]` | Run one gate manually. |

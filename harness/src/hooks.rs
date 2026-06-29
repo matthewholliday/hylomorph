@@ -167,8 +167,7 @@ pub fn save_hook_log(
     outcome: &HookOutcome,
 ) -> Result<String> {
     let dir = root.join(".harness").join("logs").join("hooks");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let ts = Utc::now().format("%Y%m%dT%H%M%SZ");
     let path = dir.join(format!("{ts}-{hook_name}.log"));
 

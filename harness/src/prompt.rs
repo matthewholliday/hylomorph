@@ -4,20 +4,28 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::HarnessConfig;
-use crate::spec::{spec_dir, Task, load_requirements};
+use crate::spec::{load_requirements, spec_dir, Task};
 use crate::state::read_progress;
 
 /// Truncate text to `max_chars` total, keeping `head_chars` from the start
 /// and `tail_chars` from the end with a `[...]` marker in the middle.
 /// Cut points snap to the nearest newline boundary so no line is split.
-fn truncate_at_newlines(text: &str, max_chars: usize, head_chars: usize, tail_chars: usize) -> String {
+fn truncate_at_newlines(
+    text: &str,
+    max_chars: usize,
+    head_chars: usize,
+    tail_chars: usize,
+) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
     let chars: Vec<char> = text.chars().collect();
     // Head: snap backward to the last newline at or before head_chars.
     let head_raw: String = chars[..head_chars.min(chars.len())].iter().collect();
-    let head_end = head_raw.rfind('\n').map(|i| i + 1).unwrap_or(head_chars.min(chars.len()));
+    let head_end = head_raw
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(head_chars.min(chars.len()));
     // Tail: snap forward to the next newline at or after the tail start.
     let tail_start_abs = chars.len().saturating_sub(tail_chars);
     let tail_raw: String = chars[tail_start_abs..].iter().collect();
@@ -102,10 +110,7 @@ pub fn compose_prompt(
         Err(_) => "[]".to_string(),
     };
 
-    let design_path = root
-        .join(".specs")
-        .join(spec_name)
-        .join("2-design.md");
+    let design_path = root.join(".specs").join(spec_name).join("2-design.md");
     let design_excerpt = if design_path.exists() {
         let design = fs::read_to_string(&design_path)
             .with_context(|| format!("Failed to read design.md at {:?}", design_path))?;

@@ -20,11 +20,17 @@ use crate::hooks::{run_hook, HookInvocation};
 use crate::loop_runner::{run, RunOptions};
 use crate::manifest::{check_spec, record_spec, DriftKind};
 use crate::prompt::compose_prompt;
-use crate::spec::{list_specs, load_requirements, load_tasks, save_tasks, spec_dir, Task, TaskStatus};
+use crate::spec::{
+    list_specs, load_requirements, load_tasks, save_tasks, spec_dir, Task, TaskStatus,
+};
 use crate::state::load_state;
 
 #[derive(Parser)]
-#[command(name = "harness", version, about = "A project-agnostic Ralph-loop agent harness")]
+#[command(
+    name = "harness",
+    version,
+    about = "A project-agnostic Ralph-loop agent harness"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -191,9 +197,7 @@ enum SpecCmd {
         part: Option<SpecPart>,
     },
     /// Print a spec's resolved contents.
-    Show {
-        name: String,
-    },
+    Show { name: String },
     /// Report requirement↔task coverage; --fix writes task stubs.
     Tasks {
         name: String,
@@ -238,6 +242,22 @@ enum EvalCmd {
     Ls { spec: String },
     /// Run a spec's evals against the current code.
     Run { spec: String },
+    /// Draft eval stubs from a spec's requirement acceptance criteria.
+    ///
+    /// Produces one reviewable `evals/<spec>/REQ-NNN-*.sh` stub per requirement.
+    /// The output is a DRAFT, not an oracle: every stub is marked with a TODO and
+    /// must be reviewed by a human before it can be trusted. By default the draft
+    /// is produced by the configured reviewer model (if any) rather than the code
+    /// agent, to keep the oracle independent of whatever writes the code.
+    Draft {
+        spec: String,
+        /// Overwrite eval scripts that already exist.
+        #[arg(long)]
+        force: bool,
+        /// Use the primary code agent instead of the reviewer model to draft.
+        #[arg(long)]
+        use_code_agent: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -313,15 +333,32 @@ fn dispatch(cli: Cli) -> Result<i32> {
             cmd_init(&root, false, force)?;
             Ok(0)
         }
-        Commands::Build { spec, all, once, max, dry_run } => {
+        Commands::Build {
+            spec,
+            all,
+            once,
+            max,
+            dry_run,
+        } => {
             let root = find_project_root()?;
             cmd_build(&root, spec, all, once, max, dry_run)
         }
-        Commands::Rebuild { spec, all, only, force } => {
+        Commands::Rebuild {
+            spec,
+            all,
+            only,
+            force,
+        } => {
             let root = find_project_root()?;
             cmd_rebuild(&root, spec, all, only.as_deref(), force, false)
         }
-        Commands::Check { spec, all, reverse, determinism, accept } => {
+        Commands::Check {
+            spec,
+            all,
+            reverse,
+            determinism,
+            accept,
+        } => {
             let root = find_project_root()?;
             cmd_check(&root, spec, all, reverse, determinism, accept)
         }
@@ -359,15 +396,32 @@ fn dispatch(cli: Cli) -> Result<i32> {
         }
 
         // ── deprecated aliases ───────────────────────────────────────────────
-        Commands::Run { spec, once, max_iterations, dry_run } => {
+        Commands::Run {
+            spec,
+            once,
+            max_iterations,
+            dry_run,
+        } => {
             deprecate("run", "build");
             let root = find_project_root()?;
             cmd_build(&root, spec, false, once, max_iterations, dry_run)
         }
-        Commands::Regen { spec, component, twice, force_boundary } => {
+        Commands::Regen {
+            spec,
+            component,
+            twice,
+            force_boundary,
+        } => {
             deprecate("regen", "rebuild");
             let root = find_project_root()?;
-            cmd_rebuild(&root, Some(spec), false, component.as_deref(), force_boundary, twice)
+            cmd_rebuild(
+                &root,
+                Some(spec),
+                false,
+                component.as_deref(),
+                force_boundary,
+                twice,
+            )
         }
         Commands::Manifest { cmd } => {
             let root = find_project_root()?;
@@ -472,8 +526,7 @@ fn cmd_check(
     // Accept: adopt current code as the baseline (escape hatch / migration).
     if accept {
         for name in &specs {
-            record_spec(root, name)
-                .with_context(|| format!("recording baseline for '{name}'"))?;
+            record_spec(root, name).with_context(|| format!("recording baseline for '{name}'"))?;
             println!("✓ accepted current code as baseline for '{name}'");
         }
         return Ok(0);
@@ -540,6 +593,7 @@ fn cmd_init(root: &Path, _from_specs: bool, force: bool) -> Result<()> {
         ("prompts/loop.md", LOOP_MD),
         ("prompts/init.md", INIT_MD),
         ("prompts/draft-spec.md", DRAFT_SPEC_PROMPT),
+        ("prompts/draft-eval.md", DRAFT_EVAL_PROMPT),
         ("logs/progress.md", "# Progress\n\n"),
         ("logs/state.json", "{\"active_spec\":null,\"iteration_count\":0,\"last_task_id\":null,\"last_task_status\":null,\"run_start\":null}\n"),
     ];
@@ -560,7 +614,13 @@ fn cmd_init(root: &Path, _from_specs: bool, force: bool) -> Result<()> {
     // Hook stubs.
     let hooks_dir = harness.join("scripts").join("hooks");
     std::fs::create_dir_all(&hooks_dir)?;
-    for name in ["run_build", "run_unit_tests", "run_e2e_tests", "run_lint", "run_update_docs"] {
+    for name in [
+        "run_build",
+        "run_unit_tests",
+        "run_e2e_tests",
+        "run_lint",
+        "run_update_docs",
+    ] {
         let path = hooks_dir.join(name);
         if path.exists() && !force {
             println!("  skip   {} (exists)", path.display());
@@ -646,7 +706,12 @@ fn cmd_spec(root: &Path, cmd: SpecCmd) -> Result<i32> {
             Ok(0)
         }
         SpecCmd::New { name, brief, from } => cmd_spec_draft(root, &name, brief, from, false),
-        SpecCmd::Draft { name, brief, from, interactive } => {
+        SpecCmd::Draft {
+            name,
+            brief,
+            from,
+            interactive,
+        } => {
             deprecate("spec draft", "spec new");
             cmd_spec_draft(root, &name, brief, from, interactive)
         }
@@ -660,10 +725,19 @@ fn cmd_spec(root: &Path, cmd: SpecCmd) -> Result<i32> {
             deprecate("spec validate", "check");
             cmd_check(root, name, all, false, false, false)
         }
-        SpecCmd::Sync { name, write, regen_tasks, against_code } => {
+        SpecCmd::Sync {
+            name,
+            write,
+            regen_tasks,
+            against_code,
+        } => {
             deprecate(
                 "spec sync",
-                if against_code { "check --reverse" } else { "spec tasks" },
+                if against_code {
+                    "check --reverse"
+                } else {
+                    "spec tasks"
+                },
             );
             if against_code {
                 cmd_sync_against_code(root, &name)?;
@@ -721,7 +795,9 @@ fn cmd_spec_draft(
     use std::io::Read as _;
 
     // ── 1. Validate the spec name slug ────────────────────────────────────────
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         || name.starts_with('-')
     {
         anyhow::bail!("spec name must match ^[a-z0-9][a-z0-9-]*$ — got '{name}'");
@@ -730,7 +806,7 @@ fn cmd_spec_draft(
     // ── 2. Read the brief ─────────────────────────────────────────────────────
     let brief_text = match (brief, from) {
         (Some(b), _) => b,
-        (None, Some(path)) if path == PathBuf::from("-") => {
+        (None, Some(path)) if path == *"-" => {
             let mut s = String::new();
             std::io::stdin()
                 .read_to_string(&mut s)
@@ -767,15 +843,15 @@ fn cmd_spec_draft(
 
     // ── 3. Ensure the spec dir exists ─────────────────────────────────────────
     let dir = spec_dir(root, name);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
 
     // ── 4. Compose the drafting prompt ────────────────────────────────────────
     // Prefer the project-local override so users can customise without
     // rebuilding the binary; fall back to the compiled-in template.
     let local_template_path = root.join(".harness").join("prompts").join("draft-spec.md");
     let template = if local_template_path.exists() {
-        std::fs::read_to_string(&local_template_path).unwrap_or_else(|_| DRAFT_SPEC_PROMPT.to_string())
+        std::fs::read_to_string(&local_template_path)
+            .unwrap_or_else(|_| DRAFT_SPEC_PROMPT.to_string())
     } else {
         DRAFT_SPEC_PROMPT.to_string()
     };
@@ -798,12 +874,22 @@ fn cmd_spec_draft(
     let wd = root.join(working_dir);
 
     println!("Drafting spec '{name}' — running agent…");
-    println!("(The agent will write .specs/{name}/1-requirements.json, 2-design.md, 3-tasks.jsonl)\n");
+    println!(
+        "(The agent will write .specs/{name}/1-requirements.json, 2-design.md, 3-tasks.jsonl)\n"
+    );
 
     let status = if cfg!(windows) {
-        Command::new("cmd").arg("/C").arg(&cmd_str).current_dir(&wd).status()
+        Command::new("cmd")
+            .arg("/C")
+            .arg(&cmd_str)
+            .current_dir(&wd)
+            .status()
     } else {
-        Command::new("sh").arg("-c").arg(&cmd_str).current_dir(&wd).status()
+        Command::new("sh")
+            .arg("-c")
+            .arg(&cmd_str)
+            .current_dir(&wd)
+            .status()
     }
     .with_context(|| format!("failed to launch agent: {cmd_str}"))?;
 
@@ -844,7 +930,10 @@ fn validate_spec(root: &Path, name: &str) -> Result<()> {
         reqs.requirements.iter().map(|r| r.id.clone()).collect();
     for r in &reqs.requirements {
         if r.acceptance_criteria.is_empty() {
-            anyhow::bail!("requirement {} has no acceptance criteria (not testable)", r.id);
+            anyhow::bail!(
+                "requirement {} has no acceptance criteria (not testable)",
+                r.id
+            );
         }
     }
 
@@ -892,9 +981,14 @@ fn validate_spec(root: &Path, name: &str) -> Result<()> {
             }
         }
         for h in &t.hooks {
-            let exists = [h.clone(), format!("{h}.ps1"), format!("{h}.cmd"), format!("{h}.bat")]
-                .iter()
-                .any(|c| hooks_dir.join(c).exists());
+            let exists = [
+                h.clone(),
+                format!("{h}.ps1"),
+                format!("{h}.cmd"),
+                format!("{h}.bat"),
+            ]
+            .iter()
+            .any(|c| hooks_dir.join(c).exists());
             if !exists {
                 anyhow::bail!("task {} references missing hook script '{}'", t.id, h);
             }
@@ -906,7 +1000,8 @@ fn validate_spec(root: &Path, name: &str) -> Result<()> {
                     anyhow::bail!(
                         "task {} references phase '{}' which is not defined in \
                          [loop].phase_sequence or [phases.*] in harness.toml",
-                        t.id, p
+                        t.id,
+                        p
                     );
                 }
             }
@@ -941,7 +1036,8 @@ fn validate_spec(root: &Path, name: &str) -> Result<()> {
                 anyhow::bail!(
                     "requirement {} has no eval in evals/{name}/ — \
                      add an eval script or stub referencing '{}'",
-                    req.id, req.id
+                    req.id,
+                    req.id
                 );
             }
         }
@@ -963,11 +1059,10 @@ fn references_id(haystack: &str, id: &str) -> bool {
     let mut start = 0;
     while let Some(pos) = haystack[start..].find(id) {
         let abs = start + pos;
-        let before_ok = abs == 0
-            || !is_id_char(haystack[..abs].chars().next_back().unwrap());
+        let before_ok = abs == 0 || !is_id_char(haystack[..abs].chars().next_back().unwrap());
         let after_idx = abs + id.len();
-        let after_ok = after_idx >= bytes.len()
-            || !is_id_char(haystack[after_idx..].chars().next().unwrap());
+        let after_ok =
+            after_idx >= bytes.len() || !is_id_char(haystack[after_idx..].chars().next().unwrap());
         if before_ok && after_ok {
             return true;
         }
@@ -1033,7 +1128,11 @@ fn cmd_sync(root: &Path, name: &str, write: bool, regen_tasks: bool) -> Result<(
     let covered: std::collections::HashSet<String> =
         tasks.iter().flat_map(|t| t.requirements.clone()).collect();
 
-    let uncovered: Vec<_> = reqs.requirements.iter().filter(|r| !covered.contains(&r.id)).collect();
+    let uncovered: Vec<_> = reqs
+        .requirements
+        .iter()
+        .filter(|r| !covered.contains(&r.id))
+        .collect();
     let orphaned: Vec<(String, String)> = tasks
         .iter()
         .flat_map(|t| {
@@ -1074,9 +1173,8 @@ fn cmd_sync(root: &Path, name: &str, write: bool, regen_tasks: bool) -> Result<(
             .unwrap_or(0);
 
         let now = Utc::now();
-        let mut next_num = max_num + 1;
 
-        for req in &uncovered {
+        for (next_num, req) in (max_num + 1..).zip(uncovered.iter()) {
             let title = req
                 .text
                 .as_deref()
@@ -1106,10 +1204,12 @@ fn cmd_sync(root: &Path, name: &str, write: bool, regen_tasks: bool) -> Result<(
             };
             println!("  + T-{:03} for {}", next_num, req.id);
             tasks.push(task);
-            next_num += 1;
         }
         save_tasks(&dir, &tasks)?;
-        println!("  wrote {} new task stub(s) to .specs/{name}/3-tasks.jsonl", uncovered.len());
+        println!(
+            "  wrote {} new task stub(s) to .specs/{name}/3-tasks.jsonl",
+            uncovered.len()
+        );
     }
 
     if regen_tasks {
@@ -1193,7 +1293,152 @@ fn cmd_eval(root: &Path, cmd: EvalCmd) -> Result<i32> {
             Ok(0)
         }
         EvalCmd::Run { spec } => cmd_eval_run(root, &spec),
+        EvalCmd::Draft {
+            spec,
+            force,
+            use_code_agent,
+        } => cmd_eval_draft(root, &spec, force, use_code_agent),
     }
+}
+
+/// Draft eval stubs from a spec's requirement acceptance criteria.
+///
+/// This mirrors `cmd_spec_draft`: compose a prompt from a template, run an agent,
+/// then leave the result for a human to review. The crucial difference from spec
+/// drafting is *independence* — the eval is meant to be an oracle that does not
+/// trust the code agent's reading of the spec. So by default we drive the draft
+/// with the configured `reviewer_command` (a second, independent model) and fall
+/// back to the primary agent only when no reviewer is configured or the caller
+/// passes `--use-code-agent`. The output is explicitly a draft: stubs are marked
+/// with TODOs and must be made real by a human before they can be trusted.
+fn cmd_eval_draft(root: &Path, spec: &str, force: bool, use_code_agent: bool) -> Result<i32> {
+    // ── 1. Load the spec's requirements (the source of the draft) ─────────────
+    let dir = spec_dir(root, spec);
+    if !dir.is_dir() {
+        anyhow::bail!("no spec '{spec}' at {} — run `harness spec new {spec}` first", dir.display());
+    }
+    let reqs = load_requirements(&dir)
+        .with_context(|| format!(".specs/{spec}/1-requirements.json failed to parse"))?;
+    if reqs.requirements.is_empty() {
+        anyhow::bail!("spec '{spec}' has no requirements to draft evals from");
+    }
+
+    // ── 2. Ensure the eval output directory exists ────────────────────────────
+    let evals_dir = root.join("evals").join(spec);
+    std::fs::create_dir_all(&evals_dir)
+        .with_context(|| format!("failed to create {}", evals_dir.display()))?;
+
+    // Tell the agent which requirements already have an eval so it can respect
+    // `--force`. We match the same way the coverage gate does: a requirement is
+    // covered if its ID appears in the text of any eval file.
+    let eval_texts: Vec<String> = std::fs::read_dir(&evals_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .filter_map(|p| std::fs::read_to_string(&p).ok())
+        .collect();
+    let covered: Vec<&str> = reqs
+        .requirements
+        .iter()
+        .map(|r| r.id.as_str())
+        .filter(|id| eval_texts.iter().any(|t| t.contains(*id)))
+        .collect();
+
+    // ── 3. Compose the requirement digest the agent will work from ────────────
+    let requirements_json = serde_json::to_string_pretty(&reqs.requirements)
+        .context("failed to serialize requirements")?;
+
+    let force_note = if force {
+        "Overwrite any existing eval script for these requirements.".to_string()
+    } else if covered.is_empty() {
+        "No requirements have evals yet; write a stub for every requirement.".to_string()
+    } else {
+        format!(
+            "These requirements ALREADY have an eval and must NOT be overwritten \
+             (skip them): {}. Write stubs only for the remaining requirements.",
+            covered.join(", ")
+        )
+    };
+
+    // ── 4. Build the prompt from the template ─────────────────────────────────
+    let local_template_path = root.join(".harness").join("prompts").join("draft-eval.md");
+    let template = if local_template_path.exists() {
+        std::fs::read_to_string(&local_template_path).unwrap_or_else(|_| DRAFT_EVAL_PROMPT.to_string())
+    } else {
+        DRAFT_EVAL_PROMPT.to_string()
+    };
+    let prompt = template
+        .replace("{spec_name}", spec)
+        .replace("{requirements}", &requirements_json)
+        .replace("{force_note}", &force_note);
+
+    let prompt_path = std::env::temp_dir().join(format!("harness-draft-eval-{spec}.md"));
+    std::fs::write(&prompt_path, &prompt)
+        .with_context(|| format!("failed to write draft prompt to {}", prompt_path.display()))?;
+
+    // ── 5. Pick the model: reviewer by default, code agent only on request ────
+    let config = load_harness_config(root)?;
+    let reviewer = config
+        .agent
+        .reviewer_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let (command_template, model_label) = match (use_code_agent, reviewer) {
+        (false, Some(rc)) => (rc.to_string(), "reviewer model (independent of code agent)"),
+        (false, None) => {
+            eprintln!(
+                "note: no reviewer_command configured — drafting with the primary code agent.\n\
+                 For a stronger, independent oracle, set agent.reviewer_command in .harness/harness.toml."
+            );
+            (config.agent.command.clone(), "primary code agent")
+        }
+        (true, _) => (config.agent.command.clone(), "primary code agent (forced)"),
+    };
+    let cmd_str = command_template.replace("{prompt_file}", &prompt_path.to_string_lossy());
+    let working_dir = config.agent.working_dir.as_deref().unwrap_or(".");
+    let wd = root.join(working_dir);
+
+    println!("Drafting evals for '{spec}' using the {model_label}…");
+    println!("(The agent will write stub scripts to evals/{spec}/)\n");
+
+    let status = if cfg!(windows) {
+        Command::new("cmd").arg("/C").arg(&cmd_str).current_dir(&wd).status()
+    } else {
+        Command::new("sh").arg("-c").arg(&cmd_str).current_dir(&wd).status()
+    }
+    .with_context(|| format!("failed to launch agent: {cmd_str}"))?;
+
+    let _ = std::fs::remove_file(&prompt_path);
+
+    let agent_exit = status.code().unwrap_or(-1);
+    if agent_exit != 0 {
+        anyhow::bail!("agent exited {agent_exit} — check agent adapter config");
+    }
+
+    // ── 6. Make the stubs executable and report ───────────────────────────────
+    let mut written = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&evals_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if p.is_file() {
+                make_executable(&p)?;
+                written += 1;
+            }
+        }
+    }
+
+    println!("\n✓ drafted evals into evals/{spec}/ ({written} script(s) present)");
+    println!("\n⚠ These are DRAFTS, not an oracle. Before trusting them:");
+    println!("  - read each stub and confirm it encodes the requirement's INTENT,");
+    println!("    not just whatever the code happens to do;");
+    println!("  - make sure no stub reads from src/ or peeks at the implementation;");
+    println!("  - replace every `# TODO` with a real, behaviour-level assertion.");
+    println!("\nThen check coverage and run them:");
+    println!("  harness check {spec}        # every requirement must have an eval");
+    println!("  harness eval run {spec}");
+    Ok(0)
 }
 
 /// Run a spec's eval scripts against the current code. The oracle is invoked
@@ -1271,7 +1516,7 @@ fn cmd_gate_check(root: &Path) -> Result<i32> {
     for g in &config.hooks.default {
         referenced.insert(g.clone());
     }
-    for (_name, pc) in &config.phases {
+    for pc in config.phases.values() {
         if let Some(hooks) = &pc.hooks {
             for g in hooks {
                 referenced.insert(g.clone());
@@ -1300,7 +1545,10 @@ fn cmd_gate_check(root: &Path) -> Result<i32> {
             println!("✗ {gate} — missing (expected {})", path.display());
             ok = false;
         } else if !is_executable(&path) {
-            println!("✗ {gate} — not executable (run: chmod +x {})", path.display());
+            println!(
+                "✗ {gate} — not executable (run: chmod +x {})",
+                path.display()
+            );
             ok = false;
         } else {
             println!("✓ {gate}");
@@ -1345,11 +1593,9 @@ fn cmd_explain(
             break;
         }
     }
-    let (task, spec_name) = found.with_context(|| {
-        match spec_filter {
-            Some(s) => format!("task '{task_id}' not found in spec '{s}'"),
-            None => format!("task '{task_id}' not found in any spec"),
-        }
+    let (task, spec_name) = found.with_context(|| match spec_filter {
+        Some(s) => format!("task '{task_id}' not found in spec '{s}'"),
+        None => format!("task '{task_id}' not found in any spec"),
     })?;
 
     // Mirror the loop's phase selection: explicit override, else the next phase
@@ -1439,7 +1685,12 @@ fn cmd_status(root: &Path) -> Result<i32> {
                         }
                     })
                     .collect();
-                println!("  {} [{:?}] phases: {}", t.id, t.status, phases_display.join(", "));
+                println!(
+                    "  {} [{:?}] phases: {}",
+                    t.id,
+                    t.status,
+                    phases_display.join(", ")
+                );
             }
         }
     }
@@ -1453,8 +1704,14 @@ fn iteration_summary_line(path: &Path) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
     let iter = v.get("iteration").and_then(|i| i.as_u64()).unwrap_or(0);
     let task = v.get("task_id").and_then(|i| i.as_str()).unwrap_or("?");
-    let status = v.get("task_status_after").and_then(|i| i.as_str()).unwrap_or("?");
-    let exit = v.get("agent_exit_status").and_then(|i| i.as_i64()).unwrap_or(0);
+    let status = v
+        .get("task_status_after")
+        .and_then(|i| i.as_str())
+        .unwrap_or("?");
+    let exit = v
+        .get("agent_exit_status")
+        .and_then(|i| i.as_i64())
+        .unwrap_or(0);
     let gates = v
         .get("hook_results")
         .and_then(|h| h.as_array())
@@ -1562,7 +1819,11 @@ fn cmd_doctor(root: &Path) -> Result<i32> {
         }};
     }
 
-    check!(".harness/ exists", root.join(".harness").is_dir(), "run `harness init`");
+    check!(
+        ".harness/ exists",
+        root.join(".harness").is_dir(),
+        "run `harness init`"
+    );
 
     let cfg = load_harness_config(root);
     check!("harness.toml parses", cfg.is_ok(), "fix TOML syntax");
@@ -1600,10 +1861,19 @@ fn cmd_doctor(root: &Path) -> Result<i32> {
 
         let hooks_dir = root.join(".harness").join("scripts").join("hooks");
         for h in &c.hooks.default {
-            let exists = [h.clone(), format!("{h}.ps1"), format!("{h}.cmd"), format!("{h}.bat")]
-                .iter()
-                .any(|cand| hooks_dir.join(cand).exists());
-            check!(format!("hook '{h}' present"), exists, "create the hook stub");
+            let exists = [
+                h.clone(),
+                format!("{h}.ps1"),
+                format!("{h}.cmd"),
+                format!("{h}.bat"),
+            ]
+            .iter()
+            .any(|cand| hooks_dir.join(cand).exists());
+            check!(
+                format!("hook '{h}' present"),
+                exists,
+                "create the hook stub"
+            );
         }
 
         if !c.loop_config.phase_sequence.is_empty() {
@@ -1612,10 +1882,14 @@ fn cmd_doctor(root: &Path) -> Result<i32> {
                 if let Some(phase_cfg) = c.phases.get(phase_name) {
                     if let Some(hooks) = &phase_cfg.hooks {
                         for h in hooks {
-                            let exists =
-                                [h.clone(), format!("{h}.ps1"), format!("{h}.cmd"), format!("{h}.bat")]
-                                    .iter()
-                                    .any(|cand| hooks_dir.join(cand).exists());
+                            let exists = [
+                                h.clone(),
+                                format!("{h}.ps1"),
+                                format!("{h}.cmd"),
+                                format!("{h}.bat"),
+                            ]
+                            .iter()
+                            .any(|cand| hooks_dir.join(cand).exists());
                             check!(
                                 format!("phase '{phase_name}' hook '{h}' present"),
                                 exists,
@@ -1636,8 +1910,16 @@ fn cmd_doctor(root: &Path) -> Result<i32> {
     }
 
     let specs = list_specs(root).unwrap_or_default();
-    check!("at least one spec", !specs.is_empty(), "run `harness spec new <name>`");
-    check!("git repository", root.join(".git").exists(), "run `git init` for rollback safety");
+    check!(
+        "at least one spec",
+        !specs.is_empty(),
+        "run `harness spec new <name>`"
+    );
+    check!(
+        "git repository",
+        root.join(".git").exists(),
+        "run `git init` for rollback safety"
+    );
 
     if !ok {
         println!("\nFor spec↔code consistency, run `harness check --all`.");
@@ -1683,7 +1965,10 @@ fn cmd_regen(
     let all_owned = crate::manifest::expand_owned_paths(root, owns)?;
     let to_burn: Vec<String> = if let Some(comp_glob) = component {
         let comp_set = crate::manifest::build_owns_globset(&[comp_glob.to_string()])?;
-        all_owned.into_iter().filter(|p| comp_set.is_match(p)).collect()
+        all_owned
+            .into_iter()
+            .filter(|p| comp_set.is_match(p))
+            .collect()
     } else {
         all_owned
     };
@@ -1696,7 +1981,14 @@ fn cmd_regen(
     let run_regen = |attempt_label: &str| -> Result<(i32, Vec<String>)> {
         // 1. Git checkpoint: record HEAD so we can roll back on failure.
         let head_sha = git_head_sha(root).unwrap_or_default();
-        println!("[{attempt_label}] HEAD checkpoint: {}", if head_sha.is_empty() { "(no commit)" } else { &head_sha });
+        println!(
+            "[{attempt_label}] HEAD checkpoint: {}",
+            if head_sha.is_empty() {
+                "(no commit)"
+            } else {
+                &head_sha
+            }
+        );
 
         // Snapshot untracked files BEFORE burning/regenerating, so rollback only
         // removes files this regen created — never the user's untracked work.
@@ -1707,8 +1999,7 @@ fn cmd_regen(
         for rel in &to_burn {
             let abs = root.join(rel);
             if abs.exists() {
-                std::fs::remove_file(&abs)
-                    .with_context(|| format!("deleting owned file {rel}"))?;
+                std::fs::remove_file(&abs).with_context(|| format!("deleting owned file {rel}"))?;
                 println!("  del {rel}");
             }
         }
@@ -1718,15 +2009,26 @@ fn cmd_regen(
         let regen_prompt = compose_regen_prompt(root, spec_name, &reqs, &to_burn)?;
         let (prompt_file, _) = crate::prompt::write_prompt_file(&regen_prompt)?;
 
-        let cmd_str = config.agent.command.replace("{prompt_file}", &prompt_file.to_string_lossy());
+        let cmd_str = config
+            .agent
+            .command
+            .replace("{prompt_file}", &prompt_file.to_string_lossy());
         let working_dir = config.agent.working_dir.as_deref().unwrap_or(".");
         let wd = root.join(working_dir);
 
         println!("[{attempt_label}] Running agent for regeneration…");
         let status = if cfg!(windows) {
-            Command::new("cmd").arg("/C").arg(&cmd_str).current_dir(&wd).status()
+            Command::new("cmd")
+                .arg("/C")
+                .arg(&cmd_str)
+                .current_dir(&wd)
+                .status()
         } else {
-            Command::new("sh").arg("-c").arg(&cmd_str).current_dir(&wd).status()
+            Command::new("sh")
+                .arg("-c")
+                .arg(&cmd_str)
+                .current_dir(&wd)
+                .status()
         }
         .with_context(|| format!("failed to launch agent: {cmd_str}"))?;
         let _ = std::fs::remove_file(&prompt_file);
@@ -1740,7 +2042,11 @@ fn cmd_regen(
 
         // 4. Run hooks (including evals from evals/<spec>/).
         let guardrails = crate::config::load_guardrails(root)?;
-        let hooks_to_run = if config.hooks.default.is_empty() { vec![] } else { config.hooks.default.clone() };
+        let hooks_to_run = if config.hooks.default.is_empty() {
+            vec![]
+        } else {
+            config.hooks.default.clone()
+        };
 
         // Also collect eval scripts for this spec.
         let eval_dir = root.join("evals").join(spec_name);
@@ -1771,12 +2077,19 @@ fn cmd_regen(
                 iteration: 0,
                 attempt: 0,
             };
-            let timeout = crate::hooks::hook_timeout(&guardrails, hook_name, config.hooks.default_timeout_secs);
+            let timeout = crate::hooks::hook_timeout(
+                &guardrails,
+                hook_name,
+                config.hooks.default_timeout_secs,
+            );
             let blocking = crate::hooks::is_hook_blocking(&guardrails, hook_name);
             match run_hook(root, &inv, &dummy_task, timeout) {
                 Ok(outcome) => {
                     let passed = outcome.exit_code == 0 && !outcome.timed_out;
-                    let entry = format!("  hook {hook_name}: {}", if passed { "PASS" } else { "FAIL" });
+                    let entry = format!(
+                        "  hook {hook_name}: {}",
+                        if passed { "PASS" } else { "FAIL" }
+                    );
                     println!("{entry}");
                     hook_log.push(entry);
                     if blocking && !passed {
@@ -1835,19 +2148,32 @@ fn cmd_regen(
         if reqs.public_interface {
             if let Some(ref reviewer_cmd) = config.agent.reviewer_command {
                 if !reviewer_cmd.is_empty() {
-                    println!("[{attempt_label}] Running cross-model reviewer (public_interface spec)…");
+                    println!(
+                        "[{attempt_label}] Running cross-model reviewer (public_interface spec)…"
+                    );
                     let review_prompt = compose_review_prompt(spec_name, &reqs, &to_burn);
                     let (review_file, _) = crate::prompt::write_prompt_file(&review_prompt)?;
-                    let rcmd = reviewer_cmd.replace("{prompt_file}", &review_file.to_string_lossy());
+                    let rcmd =
+                        reviewer_cmd.replace("{prompt_file}", &review_file.to_string_lossy());
                     let rstatus = if cfg!(windows) {
-                        Command::new("cmd").arg("/C").arg(&rcmd).current_dir(root).status()
+                        Command::new("cmd")
+                            .arg("/C")
+                            .arg(&rcmd)
+                            .current_dir(root)
+                            .status()
                     } else {
-                        Command::new("sh").arg("-c").arg(&rcmd).current_dir(root).status()
+                        Command::new("sh")
+                            .arg("-c")
+                            .arg(&rcmd)
+                            .current_dir(root)
+                            .status()
                     }
                     .with_context(|| "failed to launch reviewer")?;
                     let _ = std::fs::remove_file(&review_file);
                     if rstatus.code().unwrap_or(-1) != 0 {
-                        println!("[{attempt_label}] Reviewer rejected regeneration — rolling back.");
+                        println!(
+                            "[{attempt_label}] Reviewer rejected regeneration — rolling back."
+                        );
                         let _ = crate::util::git_restore_to_head(root, &untracked_before);
                         return Ok((-1, hook_log));
                     }
@@ -1882,7 +2208,9 @@ fn cmd_regen(
         println!("Determinism verdict: CONVERGED (both passes passed evals)");
         if !log2.is_empty() {
             println!("Second pass hooks:");
-            for l in &log2 { println!("{l}"); }
+            for l in &log2 {
+                println!("{l}");
+            }
         }
     }
 
@@ -1900,8 +2228,14 @@ fn git_head_sha(root: &Path) -> Option<String> {
 }
 
 fn git_commit_all(root: &Path, message: &str) -> Result<()> {
-    let _ = Command::new("git").args(["add", "-A"]).current_dir(root).status();
-    let _ = Command::new("git").args(["commit", "-m", message]).current_dir(root).status();
+    let _ = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(root)
+        .status();
+    let _ = Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(root)
+        .status();
     Ok(())
 }
 
@@ -1919,7 +2253,8 @@ fn compose_regen_prompt(
         String::new()
     };
     let files_list = to_burn.join("\n");
-    Ok(format!(r#"# Regeneration Task: {spec_name}
+    Ok(format!(
+        r#"# Regeneration Task: {spec_name}
 
 > **This is a REGENERATION run. The files below have been deleted. Recreate them
 > from scratch using ONLY the spec and design below. Do NOT consult any prior
@@ -1941,7 +2276,8 @@ fn compose_regen_prompt(
 - Create only the files listed in "Files to create".
 - Leave the project buildable.
 - Do not commit — the harness handles that.
-"#))
+"#
+    ))
 }
 
 fn compose_review_prompt(
@@ -1951,7 +2287,8 @@ fn compose_review_prompt(
 ) -> String {
     let req_json = serde_json::to_string_pretty(&reqs.requirements).unwrap_or_default();
     let files_list = regenerated_files.join("\n");
-    format!(r#"# Cross-Model Review: {spec_name}
+    format!(
+        r#"# Cross-Model Review: {spec_name}
 
 You are an independent reviewer. Check the regenerated files listed below against
 the requirements. Exit 0 if the implementation satisfies every requirement.
@@ -1967,7 +2304,8 @@ implementation has correctness bugs.
 ```
 
 Be rigorous. The spec is the contract; the code must satisfy it exactly.
-"#)
+"#
+    )
 }
 
 // ─── spec sync --against-code (Phase 4) ──────────────────────────────────────
@@ -1979,7 +2317,9 @@ fn cmd_sync_against_code(root: &Path, spec_name: &str) -> Result<()> {
     let reqs = load_requirements(&dir)?;
 
     if reqs.owns.is_empty() {
-        eprintln!("note: spec '{spec_name}' has no 'owns' declaration — nothing to reconstruct from.");
+        eprintln!(
+            "note: spec '{spec_name}' has no 'owns' declaration — nothing to reconstruct from."
+        );
         return Ok(());
     }
 
@@ -1995,7 +2335,8 @@ fn cmd_sync_against_code(root: &Path, spec_name: &str) -> Result<()> {
 
     // Compose the reconstruction prompt.
     let files_list = owned_files.join("\n");
-    let prompt = format!(r#"# Spec Reconstruction: {spec_name}
+    let prompt = format!(
+        r#"# Spec Reconstruction: {spec_name}
 
 Read the source files listed below and reconstruct a spec for them in Markdown.
 Do NOT read or reference any existing spec files under .specs/.
@@ -2011,19 +2352,32 @@ Your output must cover:
 {files_list}
 
 Write ONLY to the output path above. Do not modify any other file.
-"#, out = out_path.display());
+"#,
+        out = out_path.display()
+    );
 
     let config = load_harness_config(root)?;
     let (prompt_file, _) = crate::prompt::write_prompt_file(&prompt)?;
-    let cmd_str = config.agent.command.replace("{prompt_file}", &prompt_file.to_string_lossy());
+    let cmd_str = config
+        .agent
+        .command
+        .replace("{prompt_file}", &prompt_file.to_string_lossy());
     let working_dir = config.agent.working_dir.as_deref().unwrap_or(".");
     let wd = root.join(working_dir);
 
     println!("Running reconstruction agent for '{spec_name}'…");
     let status = if cfg!(windows) {
-        Command::new("cmd").arg("/C").arg(&cmd_str).current_dir(&wd).status()
+        Command::new("cmd")
+            .arg("/C")
+            .arg(&cmd_str)
+            .current_dir(&wd)
+            .status()
     } else {
-        Command::new("sh").arg("-c").arg(&cmd_str).current_dir(&wd).status()
+        Command::new("sh")
+            .arg("-c")
+            .arg(&cmd_str)
+            .current_dir(&wd)
+            .status()
     }
     .with_context(|| "failed to launch reconstruction agent")?;
     let _ = std::fs::remove_file(&prompt_file);
@@ -2042,14 +2396,13 @@ Write ONLY to the output path above. Do not modify any other file.
     println!("Reconstruction written to {}", out_path.display());
 
     // Diff the reconstruction against the canonical spec.
-    let canonical_req = std::fs::read_to_string(dir.join("1-requirements.json")).unwrap_or_default();
+    let canonical_req =
+        std::fs::read_to_string(dir.join("1-requirements.json")).unwrap_or_default();
     let canonical_design = std::fs::read_to_string(dir.join("2-design.md")).unwrap_or_default();
     let reconstructed = std::fs::read_to_string(&out_path).unwrap_or_default();
 
     // Simple heuristic convergence check: look for requirement IDs in the reconstruction.
-    let req_ids: Vec<&str> = reqs.requirements.iter()
-        .map(|r| r.id.as_str())
-        .collect();
+    let req_ids: Vec<&str> = reqs.requirements.iter().map(|r| r.id.as_str()).collect();
 
     let mut missing_in_reconstruction: Vec<&str> = Vec::new();
     for id in &req_ids {
@@ -2080,7 +2433,10 @@ Write ONLY to the output path above. Do not modify any other file.
         }
         if has_hidden_behavior {
             println!("  Hidden behavior — reconstruction describes things the spec doesn't:");
-            println!("    Review {} for undocumented behavior.", out_path.display());
+            println!(
+                "    Review {} for undocumented behavior.",
+                out_path.display()
+            );
         }
     }
 
@@ -2104,6 +2460,9 @@ const SETUP_AGENT: &str = include_str!("../templates/harness-setup.md");
 
 /// Prompt template used by `spec draft` to drive the agent.
 const DRAFT_SPEC_PROMPT: &str = include_str!("../templates/draft-spec.md");
+
+/// Prompt template used by `eval draft` to drive the agent.
+const DRAFT_EVAL_PROMPT: &str = include_str!("../templates/draft-eval.md");
 
 const HARNESS_TOML: &str = r#"[agent]
 command = "claude -p --dangerously-skip-permissions < {prompt_file}"

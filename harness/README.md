@@ -65,6 +65,7 @@ into each project (skipped if one already exists, unless `--force`).
 | `harness spec show <name>` | Print a spec's resolved contents. |
 | `harness spec tasks <name> [--fix]` | Report requirement↔task coverage; `--fix` writes task stubs. |
 | `harness eval ls <spec>` / `harness eval run <spec>` | List or run a spec's evals (the acceptance oracle). |
+| `harness eval draft <spec> [--force] [--use-code-agent]` | Draft reviewable eval stubs from the spec's acceptance criteria (independent reviewer model by default; stubs `exit 1` until a human fills in the TODOs). |
 | `harness gate ls` | List gate scripts. |
 | `harness gate check` | Verify every referenced gate exists and is executable (static preflight). Exits `2` if any is broken. |
 | `harness gate run <gate> [--task <id>]` | Run one gate manually. |

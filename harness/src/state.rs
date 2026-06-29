@@ -80,15 +80,19 @@ pub fn save_state(root: &Path, state: &LoopState) -> Result<()> {
 
 pub fn save_iteration_record(root: &Path, record: &IterationRecord) -> Result<()> {
     let iterations_dir = root.join(".harness").join("logs").join("iterations");
-    fs::create_dir_all(&iterations_dir)
-        .with_context(|| format!("Failed to create iterations directory: {}", iterations_dir.display()))?;
+    fs::create_dir_all(&iterations_dir).with_context(|| {
+        format!(
+            "Failed to create iterations directory: {}",
+            iterations_dir.display()
+        )
+    })?;
 
     let ts = record.timestamp.format("%Y%m%dT%H%M%SZ").to_string();
     let filename = format!("{}-{}.json", ts, record.iteration);
     let path = iterations_dir.join(&filename);
 
-    let data = serde_json::to_string_pretty(record)
-        .context("Failed to serialize iteration record")?;
+    let data =
+        serde_json::to_string_pretty(record).context("Failed to serialize iteration record")?;
     fs::write(&path, data)
         .with_context(|| format!("Failed to write iteration record: {}", path.display()))?;
     Ok(())
@@ -124,7 +128,7 @@ pub fn prune_iteration_logs(root: &Path, max_files: usize) -> Result<()> {
     }
     let mut entries: Vec<_> = fs::read_dir(&dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |x| x == "json"))
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .collect();
     if entries.len() <= max_files {
         return Ok(());
