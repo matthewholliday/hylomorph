@@ -160,10 +160,7 @@ impl GuiApp {
         } else {
             self.selected = self.specs.first().cloned();
         }
-        self.content = self
-            .selected
-            .clone()
-            .map(|s| Content::load(&self.root, &s));
+        self.content = self.selected.clone().map(|s| Content::load(&self.root, &s));
         self.last_load = Instant::now();
     }
 
@@ -236,7 +233,11 @@ impl GuiApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.heading("Specs");
-                    if ui.small_button("⟳").on_hover_text("Reload from disk").clicked() {
+                    if ui
+                        .small_button("⟳")
+                        .on_hover_text("Reload from disk")
+                        .clicked()
+                    {
                         self.reload();
                     }
                 });
@@ -305,7 +306,10 @@ impl GuiApp {
         let header = format!("{}  {}", status.glyph(), layer.label());
         egui::CollapsingHeader::new(RichText::new(header).color(glyph_color).strong())
             .id_salt(("layer", layer.label()))
-            .default_open(matches!(status, LayerStatus::Present | LayerStatus::Invalid(_)))
+            .default_open(matches!(
+                status,
+                LayerStatus::Present | LayerStatus::Invalid(_)
+            ))
             .show(ui, |ui| {
                 // Status line + any validation reason.
                 ui.horizontal(|ui| {
@@ -326,7 +330,9 @@ impl GuiApp {
 
     /// Render the on-disk artifact for `layer`.
     fn layer_body(&self, ui: &mut egui::Ui, layer: Layer) {
-        let Some(c) = self.content.as_ref() else { return };
+        let Some(c) = self.content.as_ref() else {
+            return;
+        };
         match layer {
             Layer::Requirements => match &c.requirements {
                 None => empty(ui),
@@ -360,10 +366,7 @@ impl GuiApp {
                         .id_salt("design-scroll")
                         .max_height(280.0)
                         .show(ui, |ui| {
-                            ui.add(
-                                egui::Label::new(RichText::new(&c.design).monospace())
-                                    .wrap(),
-                            );
+                            ui.add(egui::Label::new(RichText::new(&c.design).monospace()).wrap());
                         });
                 }
             }
@@ -422,7 +425,11 @@ impl GuiApp {
         let running = self.is_running();
 
         ui.horizontal_wrapped(|ui| {
-            let label = if status.is_present() { "Regenerate" } else { "Generate" };
+            let label = if status.is_present() {
+                "Regenerate"
+            } else {
+                "Generate"
+            };
             let can_generate = upstream_ready && !running;
             let btn = ui.add_enabled(can_generate, egui::Button::new(label));
             if btn.clicked() {
@@ -556,7 +563,13 @@ impl GuiApp {
                 }
 
                 ui.add_space(6.0);
-                ui.colored_label(DIM, format!("$ harness {}", preview_command(layer, &spec, &dialog.prompt)));
+                ui.colored_label(
+                    DIM,
+                    format!(
+                        "$ harness {}",
+                        preview_command(layer, &spec, &dialog.prompt)
+                    ),
+                );
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Proceed").clicked() {
