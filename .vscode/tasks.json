@@ -1,0 +1,44 @@
+{
+  // VS Code task schema, also understood by Zed's task runner.
+  // Run via: VS Code "Tasks: Run Task" / Zed "task: spawn".
+  "version": "2.0.0",
+  "tasks": [
+    {
+      // Launch the egui GUI rooted at the editor's workspace folder. The GUI
+      // reads `.specs/` relative to its working directory, so it shows the
+      // specs of whatever project you have open.
+      "label": "Run harness GUI",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "run",
+        "--manifest-path",
+        "${workspaceFolder}/harness/Cargo.toml",
+        "-p",
+        "harness-gui"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": ["$rustc"],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      // Dogfood against the bundled sandbox project (has the `calculator` spec),
+      // so the accordion is populated on launch.
+      "label": "Run harness GUI (sandbox project)",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "run",
+        "--manifest-path",
+        "${workspaceFolder}/harness/Cargo.toml",
+        "-p",
+        "harness-gui"
+      ],
+      "options": { "cwd": "${workspaceFolder}/sandbox/project" },
+      "problemMatcher": ["$rustc"],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    }
+  ]
+}
