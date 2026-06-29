@@ -36,11 +36,32 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            command: "claude --print --dangerously-skip-permissions -p {prompt_file}".to_string(),
+            // Pin the exact model (not a moving alias) so a model upgrade can't
+            // silently change generated code out from under the spec. The pinned
+            // ID is recorded in the manifest so drift is detectable.
+            command: "claude --print --model claude-opus-4-8 --dangerously-skip-permissions -p {prompt_file}".to_string(),
             working_dir: None,
             reviewer_command: None,
         }
     }
+}
+
+/// Extract the model ID pinned in an agent command via `--model <id>` or
+/// `--model=<id>`. Returns an empty string when no model is pinned (i.e. the
+/// command relies on a server-side default alias — a determinism hazard).
+pub fn model_id_from_command(cmd: &str) -> String {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    for (i, tok) in tokens.iter().enumerate() {
+        if let Some(rest) = tok.strip_prefix("--model=") {
+            return rest.to_string();
+        }
+        if *tok == "--model" {
+            if let Some(next) = tokens.get(i + 1) {
+                return next.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -584,5 +605,30 @@ mod tests {
         assert_eq!(g.budgets.max_iterations, 99);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn model_id_extracted_from_command_forms() {
+        assert_eq!(
+            model_id_from_command("claude -p --model claude-opus-4-8 < {prompt_file}"),
+            "claude-opus-4-8"
+        );
+        assert_eq!(
+            model_id_from_command("claude --model=claude-sonnet-4-6 -p {prompt_file}"),
+            "claude-sonnet-4-6"
+        );
+        // No model pinned → empty (a determinism hazard the harness can flag).
+        assert_eq!(model_id_from_command("claude -p {prompt_file}"), "");
+        // Dangling --model with no following token → empty, not a panic.
+        assert_eq!(model_id_from_command("claude -p {prompt_file} --model"), "");
+    }
+
+    #[test]
+    fn default_agent_command_pins_a_model() {
+        let cmd = AgentConfig::default().command;
+        assert!(
+            !model_id_from_command(&cmd).is_empty(),
+            "default agent command should pin an explicit model: {cmd}"
+        );
     }
 }
