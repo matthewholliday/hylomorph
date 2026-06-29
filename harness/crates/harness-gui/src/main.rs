@@ -364,12 +364,11 @@ impl GuiApp {
         egui::Frame::group(ui.style()).fill(BOX_BG).show(ui, |ui| {
             ui.set_width(ui.available_width());
             let id = ui.make_persistent_id(("layer", layer.label()));
-            let mut state =
-                egui::collapsing_header::CollapsingState::load_with_default_open(
-                    ui.ctx(),
-                    id,
-                    default_open,
-                );
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                default_open,
+            );
             if let Some(open) = set_all_open {
                 state.set_open(open);
             }
@@ -390,10 +389,8 @@ impl GuiApp {
                             egui::Button::new(label).min_size(egui::vec2(GEN_BTN_W, 0.0)),
                         );
                         if !missing.is_empty() {
-                            btn = btn.on_disabled_hover_text(format!(
-                                "needs: {}",
-                                missing.join(", ")
-                            ));
+                            btn = btn
+                                .on_disabled_hover_text(format!("needs: {}", missing.join(", ")));
                         }
                         if btn.clicked() {
                             self.dialog = Some(GenDialog {
