@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hylomorph-core",
+    "crates/hylomorph-cli",
+    "crates/hylomorph-gui",
+]
+
+[workspace.package]
+# Pre-1.0: the CLI surface and on-disk formats (.specs/, .hylomorph/, the JSON/JSONL
+# layer schemas) are not yet stable and may change between 0.x releases.
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+toml_edit = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+globset = "0.4"
+walkdir = "2"
+sha2 = "0.10"
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+eframe = "0.29"
+egui = "0.29"
+egui_extras = "0.29"
+rfd = "0.15"

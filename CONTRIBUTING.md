@@ -1,15 +1,15 @@
-# Contributing to harness
+# Contributing to Hylomorph
 
 Thanks for your interest in contributing. This document covers how to set up,
 build, test, and submit changes.
 
-`harness` is a project-agnostic Rust CLI that runs a coding agent as a *Ralph loop*
+`hylomorph` is a project-agnostic Rust CLI that runs a coding agent as a *Ralph loop*
 behind deterministic validation gates. The canonical and only product is the Cargo
-workspace under [`harness/`](harness/). See [AGENTS.md](AGENTS.md) for a quick
+workspace under [`hylomorph/`](hylomorph/). See [AGENTS.md](AGENTS.md) for a quick
 orientation and [README.md](README.md) for what the tool does.
 
 > **Status: pre-1.0 (0.x).** The CLI surface and on-disk formats (`.specs/`,
-> `.harness/`, the JSON/JSONL layer schemas) are not yet stable and may change
+> `.hylomorph/`, the JSON/JSONL layer schemas) are not yet stable and may change
 > between 0.x releases.
 
 ## Prerequisites
@@ -24,10 +24,10 @@ rustup component add rustfmt clippy
 
 ## Build, test, lint
 
-All commands run from the `harness/` workspace directory:
+All commands run from the `hylomorph/` workspace directory:
 
 ```sh
-cd harness
+cd hylomorph
 cargo build --locked
 cargo test  --locked
 cargo fmt --all --check
@@ -37,7 +37,7 @@ cargo clippy --all-targets --locked -- -D warnings
 CI runs exactly these four checks (with `RUSTFLAGS=-D warnings`). **Please run them
 locally before opening a PR** — a change that doesn't pass all four will fail CI.
 
-To build and install `harness` (and the optional `harness-gui`) onto your PATH:
+To build and install `hylomorph` (and the optional `hylomorph-gui`) onto your PATH:
 
 ```sh
 scripts/build-and-reinstall.sh            # both binaries
@@ -47,9 +47,9 @@ scripts/build-and-reinstall.sh --cli-only # CLI only
 ## Project layout
 
 ```
-harness/crates/harness-core/   library: the loop, gates, spec layers, state, config
-harness/crates/harness-cli/    the `harness` binary + embedded prompt templates
-harness/crates/harness-gui/    optional egui desktop front-end
+hylomorph/crates/hylomorph-core/   library: the loop, gates, spec layers, state, config
+hylomorph/crates/hylomorph-cli/    the `hylomorph` binary + embedded prompt templates
+hylomorph/crates/hylomorph-gui/    optional egui desktop front-end
 scripts/                       build/install helpers
 ```
 
@@ -91,7 +91,7 @@ This appends a `Signed-off-by:` line asserting the [DCO](https://developercertif
 ## Reporting bugs and security issues
 
 - **Bugs / features:** open a GitHub issue with steps to reproduce and the output of
-  `harness --version`.
+  `hylomorph --version`.
 - **Security vulnerabilities:** please do **not** open a public issue. Until a
   `SECURITY.md` reporting channel is published, contact the maintainers privately.
 

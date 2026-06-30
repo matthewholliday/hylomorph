@@ -1,13 +1,13 @@
 # Production-Readiness Plan — Path to an Enterprise Open-Source Release
 
-Scope: what it would take to distribute `harness` (the Rust spec-as-source
+Scope: what it would take to distribute `hylomorph` (the Rust spec-as-source
 coding-agent harness, the canonical product) as a credible open-source tool that an
 enterprise security/platform team would adopt.
 
 Severity legend: **P0** = blocks a credible release / will fail enterprise review ·
 **P1** = expected of any serious OSS tool · **P2** = polish & maturity.
 
-> **Decisions taken (canonicalization pass):** the Rust `harness/` workspace is the
+> **Decisions taken (canonicalization pass):** the Rust `hylomorph/` workspace is the
 > single canonical product. The Python `orchestrations/spec-dev/` system, the stale
 > root `src/` crate (+ root `Cargo.toml`/`Cargo.lock`), the loose MAPS/orchestration
 > design docs, the root `templates/` copies, and the orchestration-oriented `AGENTS.md`
@@ -17,11 +17,11 @@ Severity legend: **P0** = blocks a credible release / will fail enterprise revie
 
 ## 0. Repository hygiene & "one source of truth" (P0)
 
-- ~~**Two parallel, divergent codebases** (stale root `src/` vs. `harness/crates`).~~
-  **Done** — root crate, `Cargo.toml`, `Cargo.lock` removed; `harness/` is canonical.
+- ~~**Two parallel, divergent codebases** (stale root `src/` vs. `hylomorph/crates`).~~
+  **Done** — root crate, `Cargo.toml`, `Cargo.lock` removed; `hylomorph/` is canonical.
 - ~~**README build instruction built the wrong binary.**~~ **Done** — Build section now
-  points at the `harness/` workspace and `scripts/build-and-reinstall.sh`.
-- ~~**Two `Cargo.lock` files.**~~ **Done** — only `harness/Cargo.lock` remains.
+  points at the `hylomorph/` workspace and `scripts/build-and-reinstall.sh`.
+- ~~**Two `Cargo.lock` files.**~~ **Done** — only `hylomorph/Cargo.lock` remains.
 - ~~**Orchestration/MAPS design `.txt` files + stale `AGENTS.md` at root.**~~ **Removed.**
 - **Remaining loose docs:** `spec-as-source-dev-guide.md` and this `upgrades.md` still
   sit at root. Move narrative docs into a `docs/` tree (see §7).
@@ -37,7 +37,7 @@ Severity legend: **P0** = blocks a credible release / will fail enterprise revie
 - ~~**Honest versioning** (`1.0.0` while the spec is "draft v0.1").~~ **Done** — dropped
   to `0.1.0` in `[workspace.package]`, lockfile refreshed, README Status notes the
   pre-1.0 format-instability caveat. Keep `0.x` until the CLI surface and on-disk formats
-  (`.specs/`, `.harness/`, the JSON/JSONL layer schemas) are committed to.
+  (`.specs/`, `.hylomorph/`, the JSON/JSONL layer schemas) are committed to.
 - **Stability contract:** document which CLI flags, exit codes, and on-disk schemas are
   stable vs. experimental — enterprises script against these.
 - **Vendor-neutral agent runner.** The harness shells out to a generic agent command
@@ -47,7 +47,7 @@ Severity legend: **P0** = blocks a credible release / will fail enterprise revie
 ## 2. Security & trust model (P0 — the gating concern for enterprise)
 
 The tool autonomously runs an agent loop that **edits source and executes shell hooks**
-(`sh -c <cmd>` / `cmd /C` in `harness-cli/src/main.rs`).
+(`sh -c <cmd>` / `cmd /C` in `hylomorph-cli/src/main.rs`).
 
 - **Threat model & trust boundaries doc.** State plainly: the agent can modify any file
   in `owns` globs, and the harness executes arbitrary shell from hook scripts and eval
@@ -113,12 +113,12 @@ The current `release.yml` won't satisfy enterprise distribution:
 
 ## 6. Configuration & UX (P1)
 
-- **Schema-validated config.** Publish JSON Schemas for `.harness/harness.toml` and the
+- **Schema-validated config.** Publish JSON Schemas for `.hylomorph/hylomorph.toml` and the
   spec layers; validate on load with actionable errors.
 - **Config precedence** (flags > env > project file > user file) documented and tested.
-- **`harness doctor`** to diagnose the environment (git, agent runner on PATH, hook
+- **`hylomorph doctor`** to diagnose the environment (git, agent runner on PATH, hook
   scripts executable, versions).
-- **Helpful first run:** `harness init` should detect language/test runner and scaffold
+- **Helpful first run:** `hylomorph init` should detect language/test runner and scaffold
   sensible default hooks rather than empty stubs.
 
 ## 7. Documentation (P1)
@@ -142,13 +142,15 @@ The current `release.yml` won't satisfy enterprise distribution:
 - **License completeness:** MIT `LICENSE` exists (good). Add SPDX headers, a
   `THIRD-PARTY-LICENSES`/`NOTICE` aggregation (`cargo about`), and confirm dependency
   license compatibility (`cargo deny`).
-- **Trademark/naming:** "harness" is generic and collides with Harness.io. Consider a
-  distinctive name before publishing.
+- ~~**Trademark/naming:** "harness" is generic and collides with Harness.io. Consider a
+  distinctive name before publishing.~~ **Done** — the project was renamed to
+  **Hylomorph** (CLI `hylomorph`, short alias `hylo`); "harness" is retained only as a
+  generic noun for the agent-loop mechanism.
 
 ## 9. Maintainability & engineering (P2)
 
-- **Decompose the ~2.9k-line `harness-cli/src/main.rs`** into focused modules.
-- **Public API docs** (`cargo doc`) for `harness-core` if it's a reusable lib;
+- **Decompose the ~2.9k-line `hylomorph-cli/src/lib.rs`** into focused modules.
+- **Public API docs** (`cargo doc`) for `hylomorph-core` if it's a reusable lib;
   `#![warn(missing_docs)]` on core.
 - **Encoding robustness:** ensure non-UTF-8 paths and non-ASCII spec/diff content are
   handled (relevant given prior "space-in-path" fixes).

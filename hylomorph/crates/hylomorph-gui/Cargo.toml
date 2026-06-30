@@ -1,0 +1,17 @@
+[package]
+name = "hylomorph-gui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hylomorph-gui"
+path = "src/main.rs"
+
+[dependencies]
+hylomorph-core = { path = "../hylomorph-core" }
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+rfd.workspace = true
+anyhow.workspace = true
+chrono.workspace = true

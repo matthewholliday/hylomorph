@@ -19,4 +19,4 @@ if [ "$brief" != "-" ] && [ ! -f "$brief" ]; then
   exit 1
 fi
 
-exec harness spec new "$name" --from "$brief"
+exec hylomorph spec new "$name" --from "$brief"
