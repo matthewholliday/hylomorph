@@ -4,6 +4,13 @@ A project-agnostic CLI for running coding agents as a **Ralph loop** with
 deterministic, blocking validation gates ("hooks"). Implements the `hylomorph`
 design spec (draft v0.1).
 
+The name is from **hylomorphism** — Aristotle's idea that every thing is matter
+(*hyle*) shaped by form (*morphe*). That's the model here: your **spec is the
+form**, the **code is the matter** rendered from it. You author the form;
+Hylomorph renders the matter and keeps the two in sync — the agent never
+hand-edits the code, and when the spec changes the code is regenerated, not
+patched.
+
 The tool ships **no opinion** about your build system, test runner, or language.
 You fill in per-project hook scripts, a guardrails policy, and a spec; `hylomorph`
 drives a fresh-context agent over the task list one task at a time and decides
@@ -21,6 +28,10 @@ cargo build --release
 # …or build + install `hylomorph` (and the optional `hylomorph-gui`) onto your PATH:
 ../scripts/build-and-reinstall.sh
 ```
+
+Installing the CLI also puts a short **`hylo`** alias on your PATH — it's the
+same binary, so `hylo build <name>` and `hylomorph build <name>` are
+interchangeable. The rest of this README spells out `hylomorph`.
 
 ## Quick start
 
