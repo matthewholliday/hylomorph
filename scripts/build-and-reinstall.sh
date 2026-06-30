@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build the harness workspace and (re)install its binaries into ~/.cargo/bin.
+# Build the Hylomorph workspace and (re)install its binaries into ~/.cargo/bin.
 #
 # Installs two binaries by default:
-#   harness      — the CLI (crate: harness-cli)
-#   harness-gui  — the egui desktop front-end (crate: harness-gui)
+#   hylomorph      — the CLI (crate: hylomorph-cli)
+#   hylomorph-gui  — the egui desktop front-end (crate: hylomorph-gui)
 #
 # Usage:
 #   scripts/build-and-reinstall.sh            # build + install both
@@ -35,40 +35,40 @@ done
 # Resolve the repo root from this script's location, so it works from anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-HARNESS_DIR="$REPO_ROOT/harness"
+HYLOMORPH_DIR="$REPO_ROOT/hylomorph"
 
 if ! command -v cargo >/dev/null 2>&1; then
   echo "error: cargo not found on PATH — install Rust (https://rustup.rs)" >&2
   exit 1
 fi
 
-if [ ! -f "$HARNESS_DIR/Cargo.toml" ]; then
-  echo "error: no workspace Cargo.toml at $HARNESS_DIR" >&2
+if [ ! -f "$HYLOMORPH_DIR/Cargo.toml" ]; then
+  echo "error: no workspace Cargo.toml at $HYLOMORPH_DIR" >&2
   exit 1
 fi
 
-cd "$HARNESS_DIR"
+cd "$HYLOMORPH_DIR"
 
 echo "==> Building workspace (release) ..."
 cargo build --release --locked
 
 if [ "$want_cli" -eq 1 ]; then
   echo
-  echo "==> Installing harness (CLI) ..."
-  cargo install --path "$HARNESS_DIR/crates/harness-cli" --locked --force
+  echo "==> Installing hylomorph (CLI) ..."
+  cargo install --path "$HYLOMORPH_DIR/crates/hylomorph-cli" --locked --force
 fi
 
 if [ "$want_gui" -eq 1 ]; then
   echo
-  echo "==> Installing harness-gui (desktop) ..."
-  cargo install --path "$HARNESS_DIR/crates/harness-gui" --locked --force
+  echo "==> Installing hylomorph-gui (desktop) ..."
+  cargo install --path "$HYLOMORPH_DIR/crates/hylomorph-gui" --locked --force
 fi
 
 echo
 echo "Done."
-if [ "$want_cli" -eq 1 ] && command -v harness >/dev/null 2>&1; then
-  echo "  $(command -v harness)  ->  $(harness --version)"
+if [ "$want_cli" -eq 1 ] && command -v hylomorph >/dev/null 2>&1; then
+  echo "  $(command -v hylomorph)  ->  $(hylomorph --version)"
 fi
-if [ "$want_gui" -eq 1 ] && command -v harness-gui >/dev/null 2>&1; then
-  echo "  $(command -v harness-gui)"
+if [ "$want_gui" -eq 1 ] && command -v hylomorph-gui >/dev/null 2>&1; then
+  echo "  $(command -v hylomorph-gui)"
 fi

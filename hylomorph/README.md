@@ -11,15 +11,30 @@ drives a fresh-context agent over the task list one task at a time and decides
 
 ## Build
 
-The CLI lives in the Cargo workspace under `hylomorph/`.
+The repository is a Cargo workspace with three crates:
+
+- `hylomorph-core` — the shared data/logic library (config, state, specs, the loop, the snapshot read model).
+- `hylomorph-cli` — the `hylomorph` command-line tool (CLI + terminal dashboard).
+- `hylomorph-gui` — an optional desktop front-end (egui) for authoring a spec's five layers.
 
 ```sh
-cd hylomorph
 cargo build --release
-# binary at hylomorph/target/release/hylomorph
+# binary at target/release/hylomorph
+```
 
-# …or build + install `hylomorph` (and the optional `hylomorph-gui`) onto your PATH:
-../scripts/build-and-reinstall.sh
+### Desktop GUI
+
+`hylomorph-gui` is a thin front-end over the same CLI. It shows every spec under
+`.specs/` in a left column; selecting one opens an accordion of its five layers
+(requirements → design → tasks → code → evals). Each layer can be generated once
+its upstream layers exist — *Generate* opens a window for an optional prompt
+(only `requirements` accepts one today, as `--brief`), and *Proceed* shells out
+to `hylomorph …`, streaming output into a log pane. The evals layer also offers
+*Run eval suite* (`hylomorph eval run <spec>`). Run it from a project root; it
+finds the `hylomorph` binary via `HYLOMORPH_BIN`, a sibling next to itself, or `PATH`.
+
+```sh
+cargo run -p hylomorph-gui          # from your project root
 ```
 
 ## Quick start
@@ -29,40 +44,12 @@ cd your-project
 git init                         # rollback boundary; recommended
 hylomorph init                     # scaffold .hylomorph/
 # edit .hylomorph/scripts/hooks/* to run your real build/test/lint
-
-# Build the spec one layer at a time — each step is gated on the one before it:
-hylomorph spec requirements <name> --brief "what it should do"   # layer 1
-hylomorph spec design <name>                                     # layer 2 (needs requirements)
-hylomorph spec tasks <name>                                      # layer 3 (needs design)
-# …or run all three in order at once:  hylomorph spec new <name> --brief "…"
-
-hylomorph check <name>             # spec well-formed + eval coverage + drift
-hylomorph build <name>             # layer 4: generate code (needs requirements+design+tasks)
-hylomorph eval draft <name>        # layer 5: draft evals (needs code)
+hylomorph gate check               # confirm the gate scripts are wired and executable
+# author a spec under .specs/<name>/ (1-requirements.json, 2-design.md, 3-tasks.jsonl)
+hylomorph check <name>             # spec well-formed + eval coverage + no drift
+hylomorph build --dry-run --once   # preview task selection
+hylomorph build                    # drive the loop
 ```
-
-## The five-layer model
-
-A spec is built as a **vertical slice** of five layers, produced strictly in
-order. Each layer is the input to the next, and the harness makes it
-*structurally impossible* to skip ahead — the gate is enforced before any agent
-runs, not left to the agent's judgement:
-
-```
-requirements → design → tasks → code → evals
-```
-
-| layer | artifact | command | requires |
-|---|---|---|---|
-| 1 requirements | `.specs/<name>/1-requirements.json` | `hylomorph spec requirements` | — |
-| 2 design | `.specs/<name>/2-design.md` | `hylomorph spec design` | requirements |
-| 3 tasks | `.specs/<name>/3-tasks.jsonl` | `hylomorph spec tasks` | + design |
-| 4 code | files matched by the spec's `owns` globs | `hylomorph build` | + tasks |
-| 5 evals | `evals/<name>/*` | `hylomorph eval draft` | + code |
-
-Run `hylomorph spec status <name>` to see which layers exist and the single next
-allowed action. Each drafting command is also **write-scoped**: it may only
-touch its own layer's file(s); anything it writes elsewhere is reverted.
 
 ## Guided setup (optional Claude Code agent)
 
@@ -87,51 +74,38 @@ into each project (skipped if one already exists, unless `--force`).
 
 ## Commands
 
-The CLI follows one grammar: top-level **verbs** for the lifecycle (`build`,
-`rebuild`, `check`…), and **nouns** for managing source objects (`spec`, `eval`,
-`gate`). Code is treated as a build artifact rendered from the spec.
-
 | Command | Purpose |
 |---|---|
-| `hylomorph init [--force]` | Scaffold `.hylomorph/`, `evals/`, and the pre-commit gate. |
-| `hylomorph build <spec \| --all> [--once] [--max <N>] [--dry-run]` | Render code from a spec, task by task (incremental, non-destructive). |
-| `hylomorph rebuild <spec \| --all> [--only <glob>] [--force]` | Burn the spec's owned files and re-render from scratch (destructive, eval-gated). |
-| `hylomorph check [<spec> \| --all]` | The invariant gate: spec well-formed + eval coverage + no drift. |
-| `hylomorph check <spec> --reverse` | Reconstruct the spec from code and report convergence (advisory). |
-| `hylomorph check <spec> --determinism` | Rebuild twice and compare eval results (spec-tightness probe). |
-| `hylomorph check <spec> --accept` | Accept the current code as the spec's baseline (escape hatch). |
-| `hylomorph spec requirements <name> [--brief "…" \| --from <file> \| -]` | Layer 1: draft requirements from a brief. |
-| `hylomorph spec design <name>` | Layer 2: draft a design from the requirements (gated on layer 1). |
-| `hylomorph spec tasks <name>` | Layer 3: draft tasks from the design (gated on layers 1–2). |
-| `hylomorph spec new <name> [--brief "…" \| --from <file> \| -]` | Run layers 1→3 in order, each gated (convenience wrapper). |
-| `hylomorph spec status <name>` | Show the five-layer ladder and the next allowed action. |
+| `hylomorph init [--force]` | Scaffold `.hylomorph/` (config, prompts, guardrails, gate stubs, logs). |
+| `hylomorph build [<spec> \| --all] [--once] [--max <N>] [--dry-run]` | Render code from a spec, task by task (incremental, non-destructive). The Ralph loop. |
+| `hylomorph rebuild [<spec> \| --all] [--only <glob>] [--force]` | Burn a spec's owned files and re-render from the spec (destructive, eval-gated). |
+| `hylomorph check [<spec> \| --all] [--reverse] [--determinism] [--accept]` | The invariant gate: spec well-formed + eval coverage + no manifest drift. Exits `2` on any problem. |
+| `hylomorph spec ls` | List specs under `.specs/`. |
+| `hylomorph spec new <name> [--brief <text> \| --from <file>]` | Draft a new spec from a brief (agent-assisted). |
 | `hylomorph spec edit <name> [requirements\|design\|tasks]` | Open a spec file in `$EDITOR`, then check it. |
 | `hylomorph spec show <name>` | Print a spec's resolved contents. |
-| `hylomorph spec ls` | List specs under `.specs/`. |
-| `hylomorph spec coverage <name> [--fix]` | Report requirement↔task coverage; `--fix` writes task stubs. |
-| `hylomorph eval ls <spec>` | List eval scripts for a spec. |
-| `hylomorph eval run <spec>` | Run a spec's evals against the current code. |
-| `hylomorph eval draft <spec> [--force] [--use-code-agent]` | Draft reviewable eval stubs from the spec's acceptance criteria. Uses the independent reviewer model by default. |
-| `hylomorph gate ls` | List gate (validation hook) scripts. |
-| `hylomorph gate check` | Verify every referenced gate exists and is executable (static preflight; exits 2 if broken). |
-| `hylomorph gate run <name> [--task <id>]` | Run one gate manually. |
+| `hylomorph spec tasks <name> [--fix]` | Report requirement↔task coverage; `--fix` writes task stubs. |
+| `hylomorph eval ls <spec>` / `hylomorph eval run <spec>` | List or run a spec's evals (the acceptance oracle). |
+| `hylomorph eval draft <spec> [--force] [--use-code-agent]` | Draft reviewable eval stubs from the spec's acceptance criteria (independent reviewer model by default; stubs `exit 1` until a human fills in the TODOs). |
+| `hylomorph gate ls` | List gate scripts. |
+| `hylomorph gate check` | Verify every referenced gate exists and is executable (static preflight). Exits `2` if any is broken. |
+| `hylomorph gate run <gate> [--task <id>]` | Run one gate manually. |
 | `hylomorph explain <task> [--spec <name>] [--phase <name>]` | Preview the exact prompt the agent would receive for a task, without running it. |
 | `hylomorph status` | Active spec/task and task counts. |
-| `hylomorph watch` | Live terminal dashboard. |
-| `hylomorph log [<n>] [-f\|--follow]` | List iteration records, show one by number, or stream them live (`--follow`). |
-| `hylomorph doctor` | Validate environment and config (agent adapter, gates, git). |
+| `hylomorph watch` | Live terminal dashboard (TUI) that visualizes a run as it happens. |
+| `hylomorph log [<n>] [--follow]` | List iteration records, show one by number, or `--follow` to stream them live. |
+| `hylomorph doctor` | Validate config, gates, agent adapter, git. |
 
-Older verbs (`run`, `regen`, `manifest`, `hooks`, `logs`, `spec list/draft/validate/sync`)
-remain as hidden deprecated aliases that print a migration note and dispatch to
-the new command for one release.
+> Earlier verbs (`run`, `regen`, `hooks`, `logs`, `spec list/draft/validate/sync`,
+> `manifest`) still work as hidden, deprecated aliases that print a migration note.
 
 ## Exit codes (top-level)
 
 | Code | Meaning |
 |---|---|
-| `0` | Success / consistent. |
-| `1` | Usage or config error (you typed it wrong). |
-| `2` | Invariant violation — drift, failed gate/eval, or blocked tasks remaining. |
+| `0` | Success / loop completed. |
+| `1` | Usage or config error. |
+| `2` | Loop stopped with blocked tasks remaining. |
 | `3` | Agent adapter failure (in `--once` mode). |
 
 ## How the loop works
@@ -141,21 +115,52 @@ Each iteration:
 1. Select the lowest-`priority` `todo` task whose `depends_on` are all `done`
    (across all in-scope specs).
 2. Compose a prompt from the template + guardrails + the task + matching
-   requirements + design excerpt + `progress.md`. On a retry, the prior attempt's
-   captured failure (failing gate output or agent error) is injected so the agent
-   can fix the root cause instead of repeating it.
+   requirements + design excerpt + `progress.md`. If the task failed a previous
+   attempt, the captured failure (failing gate output or agent error) is injected
+   as a **"Previous attempt failed — fix this first"** section so the agent can
+   diagnose and self-correct rather than blindly repeat the same approach.
 3. Run the agent as a **fresh process** (`[agent].command`, with `{prompt_file}`
    substituted).
 4. Run the task's blocking **gates** in order. First blocking failure
    short-circuits the iteration.
 5. All blocking gates pass → mark `done`, clear the stored failure, optionally
-   `git commit`. Otherwise capture the failure, increment `attempts`, and park as
-   `blocked` once the global `[budgets].max_attempts_per_task` cap is reached.
+   `git commit`. Otherwise capture the failure into the task's `last_failure`,
+   increment `attempts`, and park as `blocked` once the global
+   `[budgets].max_attempts_per_task` cap is reached.
 6. Write a structured iteration record and update `state.json` / `progress.md`.
 
 State lives entirely on disk (`.hylomorph/`, `.specs/`), so a run is safe to
-Ctrl-C and resume (re-run `hylomorph build`). Preview any task's prompt with
-`hylomorph explain <task>`, and stream iterations live with `hylomorph log --follow`.
+Ctrl-C and resume — just re-run `hylomorph build` and it picks up the remaining
+tasks. To preview what the agent will see for a given task before (or after) a
+run, use `hylomorph explain <task>`.
+
+## Watching a run live
+
+`hylomorph watch` opens a read-only terminal dashboard that re-reads the on-disk
+run state a few times a second and paints it. Because the loop already persists
+everything as it goes (`state.json`, `iterations/*.json`, `progress.md`, and the
+per-spec `3-tasks.jsonl`), the dashboard never touches the loop — run it in a
+second terminal next to `hylomorph build`, or open it after a run to replay what
+happened.
+
+```sh
+# terminal 1
+hylomorph build
+
+# terminal 2
+hylomorph watch
+```
+
+For a lighter-weight, log-only view (no TUI), `hylomorph log --follow` streams a
+one-line summary of each iteration as it completes — handy over SSH or when piping
+to a file.
+
+The `hylomorph watch` dashboard shows run status, a done/active/todo/blocked gauge,
+the task table (in-progress first, with attempts and phase progress), a
+task-detail pane (latest iteration's agent exit, per-hook pass/fail + timings,
+commit sha, last failure), and a colorized `progress.md` tail. It auto-refreshes
+~every 0.4s. Keys: `↑/↓` select · `g/G` jump to top/bottom · `r` force refresh ·
+`q` quit.
 
 ## Hook contract
 
@@ -294,9 +299,10 @@ Tasks that omit `hooks` fall back to `[hooks].default` from `hylomorph.toml`.
 
 ```sh
 hylomorph doctor                   # confirms claude is callable, gates exist, git is present
+hylomorph gate check               # confirm every referenced gate is present and executable
 hylomorph gate run run_build       # smoke-test a single gate by hand
-hylomorph check api
-hylomorph build api                # drive the loop; each task is built/linted/tested before it counts as done
+hylomorph check api                # spec well-formed + eval coverage + no drift
+hylomorph build                    # drive the loop; each task is built/linted/tested before it counts as done
 ```
 
 If `tsc` or Vitest fails, the iteration fails: `hylomorph` increments the task's
@@ -307,12 +313,8 @@ or red test never gets recorded as done on the agent's say-so.
 
 ## Status
 
-v0.1 — **pre-1.0**. The CLI surface and on-disk formats (`.specs/`, `.hylomorph/`,
-the JSON/JSONL layer schemas) are not yet stable and may change between 0.x
-releases; pin a version if you script against them.
-
-Implemented: the full loop, gates, the gated five-layer pipeline
-(requirements → design → tasks → code → evals) with per-layer write scoping,
-drift detection (`check`), burn-and-rebuild (`rebuild`), evals, logging, and all
-CLI commands above. Not yet implemented: full deterministic task regeneration
-from requirements (`spec coverage --fix` only writes stubs today).
+v0.1. Implemented: the full loop with prior-failure feedback into retries,
+gates (with `gate check` preflight), spec authoring/coverage, the invariant
+`check`, destructive `rebuild`, prompt preview (`explain`), live `watch` and
+`log --follow`, and all CLI commands above. Not yet implemented: write-allowlist
+sandboxing and cross-model review.

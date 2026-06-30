@@ -1,0 +1,27 @@
+[package]
+name = "hylomorph-cli"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "hylomorph_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hylomorph"
+path = "src/main.rs"
+
+# Short alias — same entrypoint as `hylomorph`.
+[[bin]]
+name = "hylo"
+path = "src/bin/hylo.rs"
+
+[dependencies]
+hylomorph-core = { path = "../hylomorph-core" }
+clap.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true

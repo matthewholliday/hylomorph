@@ -17,7 +17,7 @@ env:
 
 defaults:
   run:
-    working-directory: harness
+    working-directory: hylomorph
 
 jobs:
   lint-build-test:
@@ -36,7 +36,7 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: harness
+          workspaces: hylomorph
 
       - name: Format check
         run: cargo fmt --all --check

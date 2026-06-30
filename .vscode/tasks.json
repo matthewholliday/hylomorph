@@ -7,15 +7,15 @@
       // Launch the egui GUI rooted at the editor's workspace folder. The GUI
       // reads `.specs/` relative to its working directory, so it shows the
       // specs of whatever project you have open.
-      "label": "Run harness GUI",
+      "label": "Run Hylomorph GUI",
       "type": "process",
       "command": "cargo",
       "args": [
         "run",
         "--manifest-path",
-        "${workspaceFolder}/harness/Cargo.toml",
+        "${workspaceFolder}/hylomorph/Cargo.toml",
         "-p",
-        "harness-gui"
+        "hylomorph-gui"
       ],
       "options": { "cwd": "${workspaceFolder}" },
       "problemMatcher": ["$rustc"],
@@ -25,15 +25,15 @@
     {
       // Dogfood against the bundled sandbox project (has the `calculator` spec),
       // so the accordion is populated on launch.
-      "label": "Run harness GUI (sandbox project)",
+      "label": "Run Hylomorph GUI (sandbox project)",
       "type": "process",
       "command": "cargo",
       "args": [
         "run",
         "--manifest-path",
-        "${workspaceFolder}/harness/Cargo.toml",
+        "${workspaceFolder}/hylomorph/Cargo.toml",
         "-p",
-        "harness-gui"
+        "hylomorph-gui"
       ],
       "options": { "cwd": "${workspaceFolder}/sandbox/project" },
       "problemMatcher": ["$rustc"],
