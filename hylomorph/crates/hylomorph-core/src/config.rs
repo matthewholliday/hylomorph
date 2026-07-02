@@ -496,7 +496,7 @@ pub fn save_aclc_config(root: &Path, aclc: &AclcConfig) -> Result<()> {
             ot.remove("command");
         }
     }
-    ot["protected"] = value(aclc.oracle.protected);
+    ot.remove("protected");
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -595,7 +595,6 @@ mod tests {
             resolved.oracle.command.as_deref(),
             Some("pytest -q && mypy .")
         );
-        assert!(resolved.oracle.protected);
 
         std::fs::remove_dir_all(&dir).ok();
     }

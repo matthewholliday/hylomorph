@@ -16,9 +16,8 @@
 //!
 //! Protection (§8.4) is structural in this hylomorph: the eval suite that backs
 //! the default oracle lives under `evals/` and `.specs/`, which the write guards
-//! already keep outside the agent's writable surface. `oracle.protected = true`
-//! therefore needs no extra enforcement here; `protected = false` only relaxes
-//! the §5.3 warning.
+//! already keep outside the agent's writable surface. The oracle is therefore
+//! always protected by construction — there is no config toggle to disable it.
 
 use anyhow::{Context, Result};
 use std::path::Path;

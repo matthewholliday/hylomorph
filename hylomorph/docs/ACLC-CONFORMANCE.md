@@ -33,7 +33,6 @@ on_exhaustion = "keep_best"  # keep_best | keep_last | clean
 
 [aclc.oracle]
 command = "hylomorph eval run demo"
-protected = true
 ```
 
 When the `[aclc]` table is absent the loop keeps its historical behaviour:
@@ -45,9 +44,8 @@ layer (`resolve_aclc`).
 
 - **§3 model / §3.1 defaults** — `AclcConfig` with the eight fields and the exact
   defaults (`loop=off`, `max_attempts=10`, `workspace=continue`, `memory=off`,
-  `memory_cap=8`, `learning=reflection`, `oracle.protected=true`,
-  `on_exhaustion=keep_best`). Inert fields are ignored by the engine and rendered
-  disabled in the GUI.
+  `memory_cap=8`, `learning=reflection`, `on_exhaustion=keep_best`). Inert fields
+  are ignored by the engine and rendered disabled in the GUI.
 - **§4 lifecycle** — `loop_runner::run`: prepare workspace → load memory → run
   agent → evaluate oracle → on pass return (memory untouched) → on fail derive
   learning + update memory + record attempt → on exhaustion apply policy. Memory
@@ -56,9 +54,9 @@ layer (`resolve_aclc`).
 - **§5.1 hard constraints / §6** — `aclc::validate` returns `{severity, fields,
   message}` records; the run refuses to start when any `error` is present
   (`until_pass` without oracle, `max_attempts < 1`, `memory_cap < 1`).
-- **§5.2 inert guard / §5.3 discouraged combos** — all six warning rows are
-  emitted (append-no-cap, raw-under-accumulation, unprotected-oracle-with-memory,
-  clean+fresh, fresh+memory-off, plus inert-field warnings). Warnings never block.
+- **§5.2 inert guard / §5.3 discouraged combos** — all five warning rows are
+  emitted (append-no-cap, raw-under-accumulation, clean+fresh, fresh+memory-off,
+  plus inert-field warnings). Warnings never block.
 - **§7.1 presets** — `single_pass`, `resample`, `refine`, `refine_notes`,
   `resample_notes` with normative semantics; `resample` aliases legacy "Ralph
   Loop". `hylomorph aclc preset <name>` and the GUI preset selector apply them.
@@ -81,7 +79,8 @@ layer (`resolve_aclc`).
   a fully isolated per-attempt worktree is the recommended follow-up.
 - **§8.4 protected oracle** — the default oracle is the spec's eval suite under
   `evals/`, which the write guards already keep outside the agent's writable
-  surface; `protected = true` therefore needs no extra enforcement.
+  surface; the oracle is therefore always protected by construction, with no
+  config toggle to disable it.
 - **§9 Full** — all memory modes including `compact`, both learning modes,
   compaction, the protected oracle, and the §5.2–5.3 warning set are implemented.
 

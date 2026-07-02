@@ -1043,6 +1043,9 @@ impl GuiApp {
                     let a = &mut dialog.aclc;
                     let looping = a.loop_mode == LoopMode::UntilPass;
 
+                    // Structural axes: whether the loop runs at all, its attempt
+                    // cap, and the success oracle. The friendlier retry / max-
+                    // attempts controls below build on these.
                     egui::Grid::new("aclc-grid")
                         .num_columns(2)
                         .spacing([12.0, 9.0])
@@ -1050,7 +1053,7 @@ impl GuiApp {
                             ui.label("loop").on_hover_text(
                                 "Single attempt vs. iterate. `off` runs once, end to end; \
                                  `until_pass` re-runs attempts until the oracle passes or \
-                                 max_attempts is reached.",
+                                 max attempts is reached.",
                             );
                             egui::ComboBox::from_id_salt("aclc-loop")
                                 .selected_text(if looping { "until_pass" } else { "off" })
@@ -1067,194 +1070,21 @@ impl GuiApp {
                                     )
                                     .on_hover_text(
                                         "Iterate attempts until the oracle passes or \
-                                         max_attempts is reached.",
+                                         max attempts is reached.",
                                     );
                                 });
                             ui.end_row();
 
-                            // workspace — applies when looping.
-                            ui.add_enabled_ui(looping, |ui| {
-                                ui.label("workspace").on_hover_text(
-                                    "Between attempts, reset the code to baseline (`fresh`) or \
-                                     keep the prior attempt's code and edit it (`continue`). \
-                                     Applies only when looping.",
-                                )
-                            });
-                            ui.add_enabled_ui(looping, |ui| {
-                                egui::ComboBox::from_id_salt("aclc-ws")
-                                    .selected_text(match a.workspace {
-                                        Workspace::Fresh => "fresh",
-                                        Workspace::Continue => "continue",
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut a.workspace,
-                                            Workspace::Continue,
-                                            "continue",
-                                        )
-                                        .on_hover_text(
-                                            "Leave the prior attempt's workspace in place and \
-                                             edit it.",
-                                        );
-                                        ui.selectable_value(
-                                            &mut a.workspace,
-                                            Workspace::Fresh,
-                                            "fresh",
-                                        )
-                                        .on_hover_text(
-                                            "Reset the workspace to baseline before each attempt.",
-                                        );
-                                    });
-                            });
-                            ui.end_row();
-
-                            // memory — applies when looping.
-                            ui.add_enabled_ui(looping, |ui| {
-                                ui.label("memory").on_hover_text(
-                                    "What survives a workspace reset between attempts.",
-                                )
-                            });
-                            ui.add_enabled_ui(looping, |ui| {
-                                egui::ComboBox::from_id_salt("aclc-mem")
-                                    .selected_text(match a.memory {
-                                        Memory::Off => "off",
-                                        Memory::Replace => "replace",
-                                        Memory::Append => "append",
-                                        Memory::Compact => "compact",
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut a.memory, Memory::Off, "off")
-                                            .on_hover_text("No memory is kept between attempts.");
-                                        ui.selectable_value(
-                                            &mut a.memory,
-                                            Memory::Replace,
-                                            "replace",
-                                        )
-                                        .on_hover_text(
-                                            "Memory becomes exactly the latest learning entry.",
-                                        );
-                                        ui.selectable_value(
-                                            &mut a.memory,
-                                            Memory::Append,
-                                            "append",
-                                        )
-                                        .on_hover_text(
-                                            "Each learning entry is appended; nothing is dropped.",
-                                        );
-                                        ui.selectable_value(
-                                            &mut a.memory,
-                                            Memory::Compact,
-                                            "compact",
-                                        )
-                                        .on_hover_text(
-                                            "Append, then reconcile to at most memory_cap entries.",
-                                        );
-                                    });
-                            });
-                            ui.end_row();
-
-                            // learning — applies when memory != off.
-                            let learning_on = a.memory != Memory::Off;
-                            ui.add_enabled_ui(learning_on, |ui| {
-                                ui.label("learning").on_hover_text(
-                                    "What a memory entry is. Applies when memory is not off.",
-                                )
-                            });
-                            ui.add_enabled_ui(learning_on, |ui| {
-                                egui::ComboBox::from_id_salt("aclc-learn")
-                                    .selected_text(match a.learning {
-                                        Learning::Raw => "raw",
-                                        Learning::Reflection => "reflection",
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut a.learning,
-                                            Learning::Reflection,
-                                            "reflection",
-                                        )
-                                        .on_hover_text(
-                                            "A forward-looking, actionable reflection on the \
-                                             failure.",
-                                        );
-                                        ui.selectable_value(&mut a.learning, Learning::Raw, "raw")
-                                            .on_hover_text(
-                                                "The failure signal verbatim (error message, \
-                                                 failing test output).",
-                                            );
-                                    });
-                            });
-                            ui.end_row();
-
-                            // memory_cap — applies when memory == compact.
-                            let cap_on = a.memory == Memory::Compact;
-                            ui.add_enabled_ui(cap_on, |ui| {
-                                ui.label("memory_cap").on_hover_text(
-                                    "Maximum number of retained entries under memory = compact. \
-                                     Older entries are reconciled away once the cap is exceeded.",
-                                )
-                            });
-                            ui.add_enabled_ui(cap_on, |ui| {
-                                ui.add(egui::DragValue::new(&mut a.memory_cap).range(1..=100))
-                                    .on_hover_text(
-                                        "Upper bound on retained memory entries (1–100).",
-                                    )
-                            });
-                            ui.end_row();
-
                             // max_attempts — applies when looping.
                             ui.add_enabled_ui(looping, |ui| {
-                                ui.label("max_attempts").on_hover_text(
+                                ui.label("max attempts").on_hover_text(
                                     "Maximum number of attempts under loop = until_pass before \
-                                     the run gives up and applies on_exhaustion.",
+                                     the run gives up and applies the max-attempts policy below.",
                                 )
                             });
                             ui.add_enabled_ui(looping, |ui| {
                                 ui.add(egui::DragValue::new(&mut a.max_attempts).range(1..=100))
                                     .on_hover_text("Attempt cap for this loop (1–100).")
-                            });
-                            ui.end_row();
-
-                            // on_exhaustion — applies when looping.
-                            ui.add_enabled_ui(looping, |ui| {
-                                ui.label("on_exhaustion").on_hover_text(
-                                    "What the run returns when max_attempts is reached with no \
-                                     pass.",
-                                )
-                            });
-                            ui.add_enabled_ui(looping, |ui| {
-                                egui::ComboBox::from_id_salt("aclc-exh")
-                                    .selected_text(match a.on_exhaustion {
-                                        OnExhaustion::KeepBest => "keep_best",
-                                        OnExhaustion::KeepLast => "keep_last",
-                                        OnExhaustion::Clean => "clean",
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut a.on_exhaustion,
-                                            OnExhaustion::KeepBest,
-                                            "keep_best",
-                                        )
-                                        .on_hover_text(
-                                            "Return the highest-ranked attempt. Default — \
-                                             guarantees a non-empty, best-effort result.",
-                                        );
-                                        ui.selectable_value(
-                                            &mut a.on_exhaustion,
-                                            OnExhaustion::KeepLast,
-                                            "keep_last",
-                                        )
-                                        .on_hover_text(
-                                            "Return the final attempt's workspace as-is.",
-                                        );
-                                        ui.selectable_value(
-                                            &mut a.on_exhaustion,
-                                            OnExhaustion::Clean,
-                                            "clean",
-                                        )
-                                        .on_hover_text(
-                                            "Reset the workspace to baseline and return it.",
-                                        );
-                                    });
                             });
                             ui.end_row();
 
@@ -1287,21 +1117,114 @@ impl GuiApp {
                                 }
                             });
                             ui.end_row();
-
-                            ui.add_enabled_ui(looping, |ui| {
-                                ui.label("oracle.protected").on_hover_text(
-                                    "When set, the oracle definition is kept outside the \
-                                     agent's writable workspace and never exposed to it, so the \
-                                     agent cannot read or edit the success criterion.",
-                                )
-                            });
-                            ui.add_enabled_ui(looping, |ui| {
-                                ui.checkbox(&mut a.oracle.protected, "").on_hover_text(
-                                    "Hide the oracle from the agent and protect it from edits.",
-                                )
-                            });
-                            ui.end_row();
                         });
+
+                    ui.add_space(12.0);
+
+                    // ── "When hylo retries a task…" — the between-attempts axes,
+                    //    framed as checkboxes over workspace / memory / learning. ──
+                    ui.add_enabled_ui(looping, |ui| {
+                        ui.strong("When hylo retries a task…");
+                        ui.add_space(4.0);
+
+                        // clear code changes ↔ workspace. Checked resets to
+                        // baseline (fresh); unchecked keeps and edits the prior
+                        // attempt's code (continue).
+                        let mut clear_code = a.workspace == Workspace::Fresh;
+                        if ui
+                            .checkbox(&mut clear_code, "Clear code changes")
+                            .on_hover_text(
+                                "Reset the workspace to baseline before each attempt (workspace \
+                                 = fresh). Unchecked keeps the prior attempt's code and edits it \
+                                 in place (continue).",
+                            )
+                            .changed()
+                        {
+                            a.workspace = if clear_code {
+                                Workspace::Fresh
+                            } else {
+                                Workspace::Continue
+                            };
+                        }
+
+                        // keep [num] learnings ↔ memory (off ↔ compact) + cap.
+                        let mut keep_learnings = a.memory != Memory::Off;
+                        ui.horizontal(|ui| {
+                            if ui
+                                .checkbox(&mut keep_learnings, "Keep")
+                                .on_hover_text(
+                                    "Carry a bounded, reconciled set of lessons across the \
+                                     workspace reset (memory = compact). Unchecked keeps no \
+                                     memory between attempts (off).",
+                                )
+                                .changed()
+                            {
+                                a.memory = if keep_learnings {
+                                    Memory::Compact
+                                } else {
+                                    Memory::Off
+                                };
+                            }
+                            ui.add_enabled(
+                                keep_learnings,
+                                egui::DragValue::new(&mut a.memory_cap).range(1..=100),
+                            )
+                            .on_hover_text("Upper bound on retained learning entries (1–100).");
+                            ui.add_enabled(keep_learnings, egui::Label::new("learnings"));
+                        });
+
+                        // retain context ↔ learning (reflection ↔ raw). Only
+                        // meaningful while learnings are kept (memory != off).
+                        let mut retain_context = a.learning == Learning::Raw;
+                        ui.add_enabled_ui(keep_learnings, |ui| {
+                            if ui
+                                .checkbox(&mut retain_context, "Retain context")
+                                .on_hover_text(
+                                    "Carry the failing attempt's raw output — error messages and \
+                                     failing test logs — forward verbatim (learning = raw). \
+                                     Unchecked distills each failure into a short, forward-looking \
+                                     reflection instead. Only applies while learnings are kept.",
+                                )
+                                .changed()
+                            {
+                                a.learning = if retain_context {
+                                    Learning::Raw
+                                } else {
+                                    Learning::Reflection
+                                };
+                            }
+                        });
+                    });
+
+                    ui.add_space(12.0);
+
+                    // ── "When hylo reaches max attempts…" — on_exhaustion as a
+                    //    radio group. ──
+                    ui.add_enabled_ui(looping, |ui| {
+                        ui.strong("When hylo reaches max attempts…");
+                        ui.add_space(4.0);
+                        ui.radio_value(
+                            &mut a.on_exhaustion,
+                            OnExhaustion::KeepBest,
+                            "Keep the best attempt's code",
+                        )
+                        .on_hover_text(
+                            "Return the highest-ranked attempt. Default — guarantees a \
+                             non-empty, best-effort result.",
+                        );
+                        ui.radio_value(
+                            &mut a.on_exhaustion,
+                            OnExhaustion::KeepLast,
+                            "Keep the current attempt's code",
+                        )
+                        .on_hover_text("Return the final attempt's workspace as-is.");
+                        ui.radio_value(
+                            &mut a.on_exhaustion,
+                            OnExhaustion::Clean,
+                            "Clean all changes",
+                        )
+                        .on_hover_text("Reset the workspace to baseline and return it.");
+                    });
                 });
 
                 // Live validation output (§6).

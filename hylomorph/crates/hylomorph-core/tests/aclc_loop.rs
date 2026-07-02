@@ -47,7 +47,7 @@ fn scaffold(name: &str, agent_sh: &str, oracle_cmd: &str, aclc_toml: &str) -> st
         &root.join(".hylomorph/hylomorph.toml"),
         &format!(
             "[agent]\ncommand = \"sh {} {{prompt_file}}\"\n\n{aclc_toml}\n\
-             [aclc.oracle]\ncommand = \"{oracle_cmd}\"\nprotected = true\n",
+             [aclc.oracle]\ncommand = \"{oracle_cmd}\"\n",
             agent.display()
         ),
     );

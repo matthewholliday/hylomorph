@@ -82,30 +82,16 @@ pub enum OnExhaustion {
 
 // ── Oracle (§3.1, §8.4) ───────────────────────────────────────────────────────
 
-/// The procedure that decides success, and whether the agent can see/edit it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The procedure that decides success. The oracle definition is always kept
+/// outside the agent's writable workspace and never exposed to it (§8.4); that
+/// protection is enforced structurally by the write guards (see [`crate::oracle`]),
+/// not by a config toggle.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OracleConfig {
     /// Shell command whose exit status decides pass/fail. Required when
     /// `loop = until_pass` (validated in [`validate`]); inert otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    /// When true, the oracle definition is kept outside the agent's writable
-    /// workspace and never exposed to it (§8.4).
-    #[serde(default = "default_protected")]
-    pub protected: bool,
-}
-
-fn default_protected() -> bool {
-    true
-}
-
-impl Default for OracleConfig {
-    fn default() -> Self {
-        Self {
-            command: None,
-            protected: default_protected(),
-        }
-    }
 }
 
 // ── Configuration object (§3) ─────────────────────────────────────────────────
@@ -310,12 +296,6 @@ pub fn validate(cfg: &AclcConfig) -> Vec<Finding> {
                 "learning = raw under accumulation is low-signal noise that degrades later attempts — prefer reflection",
             ));
         }
-        if !cfg.oracle.protected && cfg.memory_on() {
-            out.push(Finding::warn(
-                &["oracle.protected", "memory"],
-                "oracle.protected = false with memory on lets a reward-hacking strategy be captured as a learning and propagated across attempts",
-            ));
-        }
         if cfg.on_exhaustion == OnExhaustion::Clean && cfg.workspace == Workspace::Fresh {
             out.push(Finding::warn(
                 &["on_exhaustion", "workspace"],
@@ -476,8 +456,7 @@ pub const JSON_SCHEMA: &str = r##"{
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "command": { "type": "string" },
-        "protected": { "type": "boolean", "default": true }
+        "command": { "type": "string" }
       },
       "required": ["command"]
     },
@@ -525,7 +504,6 @@ mod tests {
         assert_eq!(c.memory, Memory::Off);
         assert_eq!(c.memory_cap, 8);
         assert_eq!(c.learning, Learning::Reflection);
-        assert!(c.oracle.protected);
         assert_eq!(c.oracle.command, None);
         assert_eq!(c.on_exhaustion, OnExhaustion::KeepBest);
     }
@@ -557,7 +535,6 @@ mod tests {
             loop_mode: LoopMode::UntilPass,
             oracle: OracleConfig {
                 command: Some("   ".into()),
-                protected: true,
             },
             ..Default::default()
         };
@@ -570,7 +547,6 @@ mod tests {
             loop_mode: LoopMode::UntilPass,
             oracle: OracleConfig {
                 command: Some("pytest".into()),
-                protected: true,
             },
             max_attempts: 0,
             memory_cap: 0,
@@ -590,7 +566,6 @@ mod tests {
     fn oracle() -> OracleConfig {
         OracleConfig {
             command: Some("pytest -q".into()),
-            protected: true,
         }
     }
 
@@ -666,23 +641,6 @@ mod tests {
         assert!(validate(&c)
             .iter()
             .any(|x| x.fields.contains(&"learning".to_string())));
-    }
-
-    #[test]
-    fn unprotected_oracle_with_memory_warns() {
-        let c = AclcConfig {
-            loop_mode: LoopMode::UntilPass,
-            oracle: OracleConfig {
-                command: Some("pytest".into()),
-                protected: false,
-            },
-            memory: Memory::Compact,
-            learning: Learning::Reflection,
-            ..Default::default()
-        };
-        assert!(validate(&c)
-            .iter()
-            .any(|x| x.fields.contains(&"oracle.protected".to_string())));
     }
 
     #[test]
